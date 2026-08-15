@@ -8,7 +8,7 @@ on:
 
 env:
   EMSDK_PATH: /tmp/emsdk
-  NNUE_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
+  NNUE_URL: https://github.com/official-pikafish/Networks/releases/download/master-net/pikafish.nnue
 
 jobs:
   Pikafish-WASM:
@@ -38,11 +38,8 @@ jobs:
       - name: Download NNUE network
         run: |
           source $EMSDK_PATH/emsdk_env.sh
-          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
-          curl -skL "${{ env.NNUE_URL }}" -o Pikafish.7z
-          7z e Pikafish.7z pikafish.nnue -y
+          curl -skL "${{ env.NNUE_URL }}" -o pikafish.nnue
           ls -lh pikafish.nnue
-          rm -f Pikafish.7z
 
       - name: Build WASM (relaxed-simd)
         run: |
