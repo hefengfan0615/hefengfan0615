@@ -47,21 +47,11 @@ jobs:
       - name: Build WASM (relaxed-simd)
         run: |
           source $EMSDK_PATH/emsdk_env.sh
-          cat > preload_nnue.js << 'EOF'
-          var Module = typeof Module != "undefined" ? Module : {};
-          Module["preRun"] = Module["preRun"] || [];
-          Module["preRun"].push(function() {
-            if (typeof require !== "undefined") {
-              var fs = require("fs");
-              FS.writeFile("/pikafish.nnue", fs.readFileSync("pikafish.nnue"));
-            }
-          });
-          EOF
           make -j$(nproc) build \
             ARCH=wasm32-relaxed-simd \
             CXX=em++ \
             COMP=gcc \
-            EXTRALDFLAGS="--pre-js preload_nnue.js" \
+            EXTRALDFLAGS="--embed-file pikafish.nnue" \
             EXE=pikafish.js
 
       - name: Create wasm directory
@@ -86,7 +76,7 @@ jobs:
         run: |
           git config user.name "Pikafish Bot"
           git config user.email "pikafish-bot@github.com"
-          git remote set-url origin "https://${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git"
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git add -f wasm/
           git commit -m "Update WASM build (single_simd_relaxed) [skip ci]" || echo "No changes to commit"
           git push
