@@ -1,0 +1,92 @@
+name: Pikafish WASM
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+env:
+  EMSDK_PATH: /tmp/emsdk
+  NNUE_URL: https://github.com/official-pikafish/Pikafish/releases/download/Pikafish-2026-01-02/Pikafish.2026-01-02.7z
+
+jobs:
+  Pikafish-WASM:
+    name: Pikafish WASM (single_simd_relaxed)
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Emscripten
+        run: |
+          git clone https://github.com/emscripten-core/emsdk.git $EMSDK_PATH
+          cd $EMSDK_PATH
+          ./emsdk install latest
+          ./emsdk activate latest
+          echo "$EMSDK_PATH/upstream/emscripten" >> $GITHUB_PATH
+          echo "$EMSDK_PATH" >> $GITHUB_PATH
+          source $EMSDK_PATH/emsdk_env.sh
+          echo "emcc: $(which emcc)"
+          emcc --version
+
+      - name: Download NNUE network
+        run: |
+          source $EMSDK_PATH/emsdk_env.sh
+          sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full
+          curl -skL "${{ env.NNUE_URL }}" -o Pikafish.7z
+          7z e Pikafish.7z pikafish.nnue -y
+          ls -lh pikafish.nnue
+          rm -f Pikafish.7z
+
+      - name: Build WASM (relaxed-simd)
+        run: |
+          source $EMSDK_PATH/emsdk_env.sh
+          cat > preload_nnue.js << 'EOF'
+          var Module = typeof Module != "undefined" ? Module : {};
+          Module["preRun"] = Module["preRun"] || [];
+          Module["preRun"].push(function() {
+            if (typeof require !== "undefined") {
+              var fs = require("fs");
+              FS.writeFile("/pikafish.nnue", fs.readFileSync("pikafish.nnue"));
+            }
+          });
+          EOF
+          make -j$(nproc) build \
+            ARCH=wasm32-relaxed-simd \
+            CXX=em++ \
+            COMP=gcc \
+            EXTRALDFLAGS="--pre-js preload_nnue.js" \
+            EXE=pikafish.js
+
+      - name: Create wasm directory
+        run: mkdir -p ../wasm
+
+      - name: Copy artifacts to wasm folder
+        run: |
+          cp pikafish.js   ../wasm/
+          cp pikafish.wasm ../wasm/
+          cp pikafish.nnue ../wasm/
+
+      - name: Online test engine search (go depth 20)
+        working-directory: wasm
+        run: |
+          echo "=== Testing relaxed-simd engine info ==="
+          node pikafish.js compiler
+          echo "=== Running go depth 20 search test ==="
+          echo -e "position startpos\ngo depth 20" | node pikafish.js
+
+      - name: Commit WASM to master branch
+        working-directory: ./
+        run: |
+          git config user.name "Pikafish Bot"
+          git config user.email "pikafish-bot@github.com"
+          git remote set-url origin "https://${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git"
+          git add -f wasm/
+          git commit -m "Update WASM build (single_simd_relaxed) [skip ci]" || echo "No changes to commit"
+          git push
