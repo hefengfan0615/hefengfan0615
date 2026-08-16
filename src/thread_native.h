@@ -52,6 +52,9 @@ class NativeThread {
     static constexpr usize TH_STACK_SIZE = 8 * 1024 * 1024;
 
    public:
+    NativeThread() :
+        thread{} {}
+
     template<class Function, class... Args>
     explicit NativeThread(Function&& fun, Args&&... args) {
         auto func = new std::function<void()>(
