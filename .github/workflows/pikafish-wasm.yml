@@ -44,11 +44,21 @@ jobs:
       - name: Build WASM (relaxed-simd)
         run: |
           source $EMSDK_PATH/emsdk_env.sh
+          cat > preload_nnue.js << 'PREEOF'
+          var Module = typeof Module != "undefined" ? Module : {};
+          Module["preRun"] = Module["preRun"] || [];
+          Module["preRun"].push(function() {
+            if (typeof require !== "undefined") {
+              var fs = require("fs");
+              FS.writeFile("/pikafish.nnue", fs.readFileSync("pikafish.nnue"));
+            }
+          });
+          PREEOF
           make -j$(nproc) build \
             ARCH=wasm32-relaxed-simd \
             CXX=em++ \
             COMP=gcc \
-            EXTRALDFLAGS="--embed-file pikafish.nnue" \
+            EXTRALDFLAGS="--pre-js preload_nnue.js" \
             EXE=pikafish.js
 
       - name: Create wasm directory
@@ -65,6 +75,8 @@ jobs:
         run: |
           echo "=== Testing relaxed-simd engine info ==="
           node pikafish.js compiler
+          echo "=== Running bench search test ==="
+          node pikafish.js bench 16 1 1
           echo "=== Running go depth 20 search test ==="
           echo -e "position startpos\ngo depth 20" | node pikafish.js
 
