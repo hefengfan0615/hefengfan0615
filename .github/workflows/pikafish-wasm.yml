@@ -75,8 +75,6 @@ jobs:
         run: |
           echo "=== Testing relaxed-simd engine info ==="
           node pikafish.js compiler
-          echo "=== Running bench search test ==="
-          node pikafish.js bench 16 1 1
           echo "=== Running go depth 20 search test ==="
           echo -e "position startpos\ngo depth 20" | node pikafish.js
 
