@@ -48,6 +48,7 @@ jobs:
             ARCH=wasm32-relaxed-simd \
             CXX=em++ \
             COMP=gcc \
+            EXTRACXXFLAGS="-DWASM_SINGLE_THREAD" \
             EXTRALDFLAGS="--embed-file pikafish.nnue" \
             EXE=pikafish.js
 

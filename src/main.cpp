@@ -28,6 +28,39 @@
 
 using namespace Stockfish;
 
+#ifdef WASM_SINGLE_THREAD
+    #include <emscripten.h>
+
+extern "C" {
+EMSCRIPTEN_KEEPALIVE
+void wasm_uci_execute() {
+    std::string input;
+    std::getline(std::cin, input);
+
+    if (input.empty())
+        return;
+
+    char* argv[2] = {input.data(), input.data()};
+    auto  cli     = CommandLine(2, argv);
+
+    static bool                       initialized = false;
+    static std::unique_ptr<UCIEngine> uci;
+
+    if (!initialized)
+    {
+        Attacks::init();
+        Position::init();
+        uci = std::make_unique<UCIEngine>(std::move(cli));
+        Tune::init(uci->engine_options());
+        initialized = true;
+    }
+
+    uci->set_cli(std::move(cli));
+    uci->loop();
+}
+}
+#endif
+
 #ifdef UNIVERSAL_BINARY
 namespace Stockfish {
 
