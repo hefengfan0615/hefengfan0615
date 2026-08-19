@@ -72,7 +72,7 @@ jobs:
           cp -f pikafish.wasm      ../wasm/
           cp -f pikafish.data      ../wasm/
           [ -f pikafish.worker.js ] && cp -f pikafish.worker.js ../wasm/ || true
-          cp -f pikafish.nnue      ../wasm/
+          # NNUE is already packaged inside pikafish.data, no need to ship the raw .nnue
           cp -f emscripten/pikafish.html ../wasm/
           cp -f emscripten/serve.json    ../wasm/
           cp -f emscripten/test.js       ../wasm/
@@ -86,6 +86,8 @@ jobs:
       #     engine terminates well before the 10 s budget.
       - name: Web-style test (go depth 20, then movetime 10000 + stop)
         working-directory: wasm
+        env:
+          PRINT_OUTPUT: "1"
         run: |
           node test.js pikafish.js
 
