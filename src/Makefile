@@ -896,7 +896,7 @@ ifeq ($(arch),wasm32)
 	ifeq ($(WASM_THREADS),yes)
 		CXXFLAGS += -pthread
 		# pthreads require a fixed MAXIMUM_MEMORY together with ALLOW_MEMORY_GROWTH
-		LDFLAGS += -pthread -sUSE_PTHREADS=1 -sPTHREAD_POOL_SIZE=8 \
+		LDFLAGS += -pthread -sPTHREAD_POOL_SIZE=8 \
 			-sMAXIMUM_MEMORY=2GB -sEXIT_RUNTIME=0
 	else
 		CXXFLAGS += -DWASM_SINGLE_THREAD

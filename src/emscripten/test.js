@@ -10,7 +10,12 @@
 // Usage: node test.js [path-to-pikafish.js]
 "use strict";
 
-const modulePath = process.argv[2] || "./pikafish.js";
+const moduleArg = process.argv[2] || "./pikafish.js";
+// Node resolves relative requires with "./" (a bare name is a module lookup)
+const modulePath =
+  moduleArg.startsWith(".") || moduleArg.startsWith("/") || moduleArg.startsWith("file:")
+    ? moduleArg
+    : "./" + moduleArg;
 const PRINT = process.env.PRINT_OUTPUT === "1";
 const Pikafish = require(modulePath);
 

@@ -56,7 +56,14 @@ jobs:
             WASM_THREADS=yes \
             EXE=pikafish.js
           echo "=== Build artifacts (NNUE packaged into pikafish.data) ==="
-          ls -lh pikafish.js pikafish.wasm pikafish.data pikafish.worker.js
+          ls -lh pikafish.js pikafish.wasm pikafish.data
+          # With -pthread emcc normally emits a separate pikafish.worker.js.
+          # Newer Emscripten may inline the worker into pikafish.js instead.
+          if [ -f pikafish.worker.js ]; then
+            ls -lh pikafish.worker.js
+          else
+            echo "(no separate pikafish.worker.js -> worker code is inlined in pikafish.js)"
+          fi
 
       - name: Deploy wasm folder (js/wasm/data/worker + web page assets)
         run: |
@@ -64,7 +71,7 @@ jobs:
           cp -f pikafish.js        ../wasm/
           cp -f pikafish.wasm      ../wasm/
           cp -f pikafish.data      ../wasm/
-          cp -f pikafish.worker.js ../wasm/
+          [ -f pikafish.worker.js ] && cp -f pikafish.worker.js ../wasm/ || true
           cp -f pikafish.nnue      ../wasm/
           cp -f emscripten/pikafish.html ../wasm/
           cp -f emscripten/serve.json    ../wasm/
