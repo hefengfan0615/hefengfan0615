@@ -25,8 +25,10 @@ let engine = null;
 const engineReady = Pikafish().then((p) => {
   engine = p;
   engine.read_stdout = (text) => {
-    out += text;
-    if (PRINT) process.stdout.write(text);
+    // preamble.js delivers each engine line without its trailing "\n",
+    // so append one to keep the logged output line-separated.
+    out += text + "\n";
+    if (PRINT) process.stdout.write(text + "\n");
   };
 });
 
