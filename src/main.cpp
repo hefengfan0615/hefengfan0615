@@ -28,9 +28,15 @@
 
 using namespace Stockfish;
 
-#ifdef WASM_SINGLE_THREAD
+#if defined(__EMSCRIPTEN__)
     #include <emscripten.h>
 
+// For WebAssembly builds (both single-threaded and pthreads) the web page does
+// not run main().  Instead the page calls Module.send_command() which is wired
+// (see emscripten/preamble.js) to this function.  Each call processes exactly
+// one UCI command so that the JavaScript event loop stays responsive and can
+// send "stop" to terminate an on-going search.
+// Reference: https://github.com/official-pikafish/Pikafish (wasm branch).
 extern "C" {
 EMSCRIPTEN_KEEPALIVE
 void wasm_uci_execute() {
@@ -72,6 +78,9 @@ __attribute__((used))  // keep main alive
 int main(int argc, char* argv[]) {
     std::cout << engine_info() << std::endl;
 
+    // In WASM builds main() is not used: the page drives the engine through
+    // wasm_uci_execute() (see above and emscripten/preamble.js).
+#ifndef __EMSCRIPTEN__
     Attacks::init();
     Position::init();
 
@@ -81,6 +90,7 @@ int main(int argc, char* argv[]) {
     Tune::init(uci->engine_options());
 
     uci->loop();
+#endif
 
     return 0;
 }

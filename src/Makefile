@@ -870,10 +870,36 @@ ifeq ($(lsx),yes)
 endif
 
 ifeq ($(arch),wasm32)
-	CXXFLAGS += -pthread -msimd128 -DUSE_POPCNT -DUSE_SLOPPY_ATOMICS
-	LDFLAGS += -pthread -sINITIAL_MEMORY=128MB -sALLOW_MEMORY_GROWTH -sSTACK_SIZE=3MB
+	# WebAssembly build for browser / web page use (see emscripten/).
+	# The NNUE network is packaged into a standalone data file (pikafish.data)
+	# at link time via --preload-file, and the engine is exposed to the page
+	# through Module.send_command() (see emscripten/preamble.js).
+	CXXFLAGS += -msimd128 -DUSE_POPCNT -DUSE_SLOPPY_ATOMICS
+	LDFLAGS += \
+		-sINITIAL_MEMORY=128MB -sALLOW_MEMORY_GROWTH -sSTACK_SIZE=3MB \
+		--pre-js emscripten/preamble.js \
+		--preload-file pikafish.nnue@pikafish.nnue \
+		-s ENVIRONMENT=web,worker,node \
+		-s MODULARIZE=1 \
+		-s EXPORT_NAME="Pikafish" \
+		-s FILESYSTEM=1 \
+		-s EXPORTED_RUNTIME_METHODS="['cwrap']" \
+		-s EXPORTED_FUNCTIONS="['_main', '_wasm_uci_execute']" \
+		-s ALLOW_UNIMPLEMENTED_SYSCALLS
 	ifeq ($(relaxedsimd),yes)
 		CXXFLAGS += -mrelaxed-simd
+	endif
+	# Threading. By default (WASM_THREADS=yes) the engine is built with pthreads so
+	# the search runs on separate threads and the page can send "stop" to terminate
+	# an ongoing search. Set WASM_THREADS=no to build the single-threaded variant
+	# (the search then blocks until it finishes on its own).
+	ifeq ($(WASM_THREADS),yes)
+		CXXFLAGS += -pthread
+		# pthreads require a fixed MAXIMUM_MEMORY together with ALLOW_MEMORY_GROWTH
+		LDFLAGS += -pthread -sUSE_PTHREADS=1 -sPTHREAD_POOL_SIZE=8 \
+			-sMAXIMUM_MEMORY=2GB -sEXIT_RUNTIME=0
+	else
+		CXXFLAGS += -DWASM_SINGLE_THREAD
 	endif
 endif
 

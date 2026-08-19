@@ -12,7 +12,7 @@ env:
 
 jobs:
   Pikafish-WASM:
-    name: Pikafish WASM (single_simd_relaxed)
+    name: Pikafish WASM (multithreaded, NNUE -> .data)
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -25,7 +25,7 @@ jobs:
 
       - name: Install Emscripten
         run: |
-          git clone https://github.com/emscripten-core/emsdk.git $EMSDK_PATH
+          git clone --depth 1 https://github.com/emscripten-core/emsdk.git $EMSDK_PATH
           cd $EMSDK_PATH
           ./emsdk install latest
           ./emsdk activate latest
@@ -41,33 +41,46 @@ jobs:
           curl -skL "${{ env.NNUE_URL }}" -o pikafish.nnue
           ls -lh pikafish.nnue
 
-      - name: Build WASM (relaxed-simd)
+      # Step 1: build the WASM engine and package the NNUE network into a
+      # standalone data file (pikafish.data) via --preload-file, exactly like
+      # the reference Pikafish wasm branch. WASM_THREADS=yes links with
+      # pthreads so the search runs off the main thread and the web page can
+      # send "stop" to terminate it.
+      - name: Build WASM and package NNUE into data file (pikafish.data)
         run: |
           source $EMSDK_PATH/emsdk_env.sh
           make -j$(nproc) build \
             ARCH=wasm32-relaxed-simd \
             CXX=em++ \
             COMP=gcc \
-            EXTRACXXFLAGS="-DWASM_SINGLE_THREAD" \
-            EXTRALDFLAGS="--embed-file pikafish.nnue" \
+            WASM_THREADS=yes \
             EXE=pikafish.js
+          echo "=== Build artifacts (NNUE packaged into pikafish.data) ==="
+          ls -lh pikafish.js pikafish.wasm pikafish.data pikafish.worker.js
 
-      - name: Create wasm directory
-        run: mkdir -p ../wasm
-
-      - name: Copy artifacts to wasm folder
+      - name: Deploy wasm folder (js/wasm/data/worker + web page assets)
         run: |
-          cp pikafish.js   ../wasm/
-          cp pikafish.wasm ../wasm/
-          cp pikafish.nnue ../wasm/
+          mkdir -p ../wasm
+          cp -f pikafish.js        ../wasm/
+          cp -f pikafish.wasm      ../wasm/
+          cp -f pikafish.data      ../wasm/
+          cp -f pikafish.worker.js ../wasm/
+          cp -f pikafish.nnue      ../wasm/
+          cp -f emscripten/pikafish.html ../wasm/
+          cp -f emscripten/serve.json    ../wasm/
+          cp -f emscripten/test.js       ../wasm/
+          ls -lh ../wasm/
 
-      - name: Online test engine search (go depth 20)
+      # Step 2: test exactly like the web page loads the engine
+      # (Pikafish().then(...); engine.send_command(...)):
+      #   - uci / isready handshake (NNUE data file is loaded from pikafish.data)
+      #   - go depth 20 -> bestmove
+      #   - go movetime 10000, then send "stop" 3 seconds later and verify the
+      #     engine terminates well before the 10 s budget.
+      - name: Web-style test (go depth 20, then movetime 10000 + stop)
         working-directory: wasm
         run: |
-          echo "=== Testing relaxed-simd engine info ==="
-          node pikafish.js compiler
-          echo "=== Running go depth 20 search test ==="
-          echo -e "position startpos\ngo depth 20" | node pikafish.js
+          node test.js pikafish.js
 
       - name: Commit WASM to master branch
         working-directory: ./
@@ -76,5 +89,5 @@ jobs:
           git config user.email "pikafish-bot@github.com"
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
           git add -f wasm/
-          git commit -m "Update WASM build (single_simd_relaxed) [skip ci]" || echo "No changes to commit"
+          git commit -m "Update WASM build (multithreaded, NNUE data file) [skip ci]" || echo "No changes to commit"
           git push
