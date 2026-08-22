@@ -32889,27 +32889,33 @@ const gy = "XIANGQIAI_COM_"
                             return;
                     let r = this.chessDbRecords[t]
                       , i = !1;
-                    if (!e && r.msg === "") {
+                    if (!e && r && r.msg === "" && Array.isArray(r.moveList) && r.moveList.length > 0) {
                         let n = r.moveList[0].score;
-                        (this.flipBoard ? "b" : "w") !== r.side && (n = -n),
-                        n > 2e4 ? n = {
-                            mate: 3e4 - n
-                        } : n < -2e4 ? n = {
-                            mate: -3e4 - n
-                        } : n = {
-                            cp: n
-                        };
-                        let a = r.moveList[0];
-                        (this.game.getMoveList().length < this.thinkingSettings.chessdb.disable_ply || a.type === "egtb" && this.thinkingSettings.chessdb.always_use_egtb) && (this.thinkingDetail.unshift([{
-                            board_side: this.flipBoard ? "b" : "w",
-                            type: "chessdb",
-                            pv: a.move,
-                            pvChn: a.chn_move_name,
-                            score: n,
-                            side: r.side
-                        }]),
-                        this.makeMoveByString(a.move),
-                        i = !0)
+                        if (typeof n === "number") {
+                            (this.flipBoard ? "b" : "w") !== r.side && (n = -n),
+                            n > 2e4 ? n = {
+                                mate: 3e4 - n
+                            } : n < -2e4 ? n = {
+                                mate: -3e4 - n
+                            } : n = {
+                                cp: n
+                            };
+                            let a = r.moveList[0];
+                            try {
+                                (this.game.getMoveList().length < this.thinkingSettings.chessdb.disable_ply || a.type === "egtb" && this.thinkingSettings.chessdb.always_use_egtb) && (this.thinkingDetail.unshift([{
+                                    board_side: this.flipBoard ? "b" : "w",
+                                    type: "chessdb",
+                                    pv: a.move,
+                                    pvChn: a.chn_move_name,
+                                    score: n,
+                                    side: r.side
+                                }]),
+                                this.makeMoveByString(a.move),
+                                i = !0)
+                            } catch (t) {
+                                console.log(t)
+                            }
+                        }
                     }
                     i || (this.engine.setFen(this.game.getFenWithMove()),
                     this.multiPvInfoBuffer = {},
