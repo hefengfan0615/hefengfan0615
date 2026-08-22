@@ -32682,7 +32682,7 @@ const gy = "XIANGQIAI_COM_"
         onEngineOptions(t) {},
         onEngineDownload(t) {
             if (this.downloadProgress !== 1)
-                if (t.includes("Downloading")) {
+                if (t.includes("Downloading") && t.includes("(")) {
                     let e = t.split("(")[1].split(")")[0].split("/")
                       , r = parseInt(e[0])
                       , i = parseInt(e[1]);
