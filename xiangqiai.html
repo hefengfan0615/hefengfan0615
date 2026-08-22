@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width,initial-scale=1.0">
+    <title>丰帆象棋</title>
+    <script>
+        // 阻止手机QQ内置浏览器加载ServiceWorker
+        if (navigator.userAgent.includes('TBS')) {
+            navigator.serviceWorker.register = () => new Promise(() => {});
+        }
+    </script>
+    <!-- Google tag (gtag.js) -->
+    <script async src="https://www.googletagmanager.com/gtag/js?id=G-5HCDHN4N79"></script>
+    <script>
+        window.dataLayer = window.dataLayer || [];
+        function gtag() { dataLayer.push(arguments); }
+        gtag('js', new Date());
+        gtag('config', 'G-5HCDHN4N79');
+    </script>
+    <script>
+            var _hmt = _hmt || [];
+            (function () {
+                var hm = document.createElement("script");
+                hm.src = "https://hm.baidu.com/hm.js?19a00d4cb2bd656e397d084c9e281945";
+                var s = document.getElementsByTagName("script")[0];
+                s.parentNode.insertBefore(hm, s);
+            })();
+    </script>
+  <script type="module" crossorigin src="/assets/index.b58f0dd0.js"></script>
+  <link rel="stylesheet" href="/assets/index.65062099.css">
+<body>
+    <noscript>
+        <strong>丰帆象棋需要使用JavaScript</strong>
+    </noscript>
+    <div id="app"></div>
+    <!-- built files will be auto injected -->
+</body>
+
+</html>
