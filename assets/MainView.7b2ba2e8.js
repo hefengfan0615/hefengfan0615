@@ -395,7 +395,7 @@ class Y1 {
         );
         Lt(this, "setFen", e=>{
             this.AnalyzingFen = e,
-            this.sendCommand("fen " + e)
+            this.sendCommand("position fen " + e)
         }
         );
         Lt(this, "sendCommand", e=>{
