@@ -1,28 +1,124 @@
-addEventListener("fetch", function(event) {
-	if (event.request.cache === "only-if-cached" && event.request.mode !== "same-origin") {
-		return;
-	}
-	event.respondWith(
-		fetch(event.request)
-			.then(function(response) {
-				// Check if the response is valid
-				if (!response || response.status < 200 || response.status >= 600) {
-					return;
-				}
+// Fengfan Xiangqi Service Worker
+// 缓存优先加载，刷新后依靠离线资源快速启动；
+// 同时为所有响应注入跨源隔离头，保证多线程 WASM 引擎（SharedArrayBuffer）可用。
+// v5: 对无效/opaque/状态码越界的响应不再重构，避免 new Response(status=0) 抛 RangeError。
 
-				const newHeaders = new Headers(response.headers);
-				newHeaders.set("Cross-Origin-Embedder-Policy", "require-corp");
-				newHeaders.set("Cross-Origin-Opener-Policy", "same-origin");
-				const moddedResponse = new Response(response.body, {
-					status: response.status,
-					statusText: response.statusText,
-					headers: newHeaders,
-				});
+const CACHE = "fengfan-xiangqi-v5";
 
-				return moddedResponse;
-			})
-			.catch(function(e) {
-				console.error(e);
-			})
-	);
+// 预缓存应用外壳与引擎文件，方便下一次直接/离线快速加载
+const PRECACHE = [
+    "/xiangqiai.html",
+    "/assets/index.b58f0dd0.js",
+    "/assets/index.65062099.css",
+    "/wasm/pikafish.js",
+    "/wasm/pikafish.wasm",
+    "/wasm/pikafish.data"
+];
+
+// 安装：预缓存全部资源并立即接管（allSettled 保证任一失败也不会阻塞激活）
+self.addEventListener("install", function(event) {
+    event.waitUntil(
+        caches.open(CACHE).then(function(cache) {
+            return Promise.allSettled(
+                PRECACHE.map(function(url) {
+                    return cache.add(url);
+                })
+            );
+        }).then(function() {
+            return self.skipWaiting();
+        })
+    );
 });
+
+// 激活：清理旧缓存并接管所有页面
+self.addEventListener("activate", function(event) {
+    event.waitUntil(
+        caches.keys().then(function(keys) {
+            return Promise.all(
+                keys.filter(function(k) {
+                    return k !== CACHE;
+                }).map(function(k) {
+                    return caches.delete(k);
+                })
+            );
+        }).then(function() {
+            return self.clients.claim();
+        })
+    );
+});
+
+self.addEventListener("fetch", function(event) {
+    if (event.request.cache === "only-if-cached" && event.request.mode !== "same-origin") {
+        return;
+    }
+    event.respondWith(
+        serve(event.request).catch(function(e) {
+            // 任何处理异常都回退到普通网络请求，绝不因 SW 异常拖垮资源加载
+            console.error(e);
+            return fetch(event.request);
+        })
+    );
+});
+
+async function serve(request) {
+    if (request.method !== "GET") {
+        return withIsolationHeaders(await fetch(request));
+    }
+
+    const url = new URL(request.url);
+    const sameOrigin = url.origin === location.origin;
+
+    // 浏览器直接检索同名同源缓存，避免重复下载，保证刷新时快速、可离线
+    if (sameOrigin) {
+        const cached = await caches.match(request);
+        if (cached) {
+            return withIsolationHeaders(cached);
+        }
+    }
+
+    const response = await fetch(request);
+    if (isValidResponse(response)) {
+        // 缓存同源响应；跨源（如云库 chessdb.cn）不缓存
+        if (sameOrigin && response.type === "basic") {
+            const copy = response.clone();
+            caches.open(CACHE).then(function(cache) {
+                return cache.put(request, copy);
+            }).catch(function(e) {
+                console.error(e);
+            });
+        }
+    }
+    return withIsolationHeaders(response);
+}
+
+// 判断响应是否可安全重构（状态码为 [200,599] 且非 opaque）
+function isValidResponse(response) {
+    return !!response && typeof response.status === "number" &&
+        response.status >= 200 && response.status < 600 &&
+        response.type !== "opaque" && response.type !== "opaqueredirect";
+}
+
+// 注入跨源隔离头，保证 COOP/COEP 生效，使多线程引擎可正常运行。
+// 对 opaque / 状态码不在合法范围的响应无法（也无需）重构，直接透传，
+// 避免构造 Response 时抛 RangeError。
+function withIsolationHeaders(response) {
+    if (!response) {
+        return response;
+    }
+    const status = response.status;
+    if (status < 200 || status > 599 || response.type === "opaque" || response.type === "opaqueredirect") {
+        return response;
+    }
+    try {
+        const newHeaders = new Headers(response.headers);
+        newHeaders.set("Cross-Origin-Embedder-Policy", "require-corp");
+        newHeaders.set("Cross-Origin-Opener-Policy", "same-origin");
+        return new Response(response.body, {
+            status: status,
+            statusText: response.statusText,
+            headers: newHeaders
+        });
+    } catch (e) {
+        return response;
+    }
+}
