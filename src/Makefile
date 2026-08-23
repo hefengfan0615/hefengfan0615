@@ -874,8 +874,9 @@ ifeq ($(arch),wasm32)
 	# The NNUE network is packaged into a standalone data file (pikafish.data)
 	# at link time via --preload-file, and the engine is exposed to the page
 	# through Module.send_command() (see emscripten/preamble.js).
-	CXXFLAGS += -msimd128 -DUSE_POPCNT -DUSE_SLOPPY_ATOMICS
+	CXXFLAGS += -msimd128 -DUSE_POPCNT -DUSE_SLOPPY_ATOMICS -flto
 	LDFLAGS += \
+		-flto \
 		-sINITIAL_MEMORY=128MB -sALLOW_MEMORY_GROWTH -sSTACK_SIZE=3MB \
 		--pre-js emscripten/preamble.js \
 		--preload-file pikafish.nnue@pikafish.nnue \
@@ -893,11 +894,20 @@ ifeq ($(arch),wasm32)
 	# the search runs on separate threads and the page can send "stop" to terminate
 	# an ongoing search. Set WASM_THREADS=no to build the single-threaded variant
 	# (the search then blocks until it finishes on its own).
+	#
+	# The flags below mirror the reference Pikafish wasm branch (wasm-multi*):
+	#   - PROXY_TO_PTHREAD: run the emscripten main on its own pthread, so the
+	#     search worker threads get the full pool and the web page thread is not
+	#     blocked while the engine is thinking.
+	#   - PTHREAD_POOL_SIZE: scale the pool to the machine's CPU cores instead of a
+	#     fixed value, so browsers with many cores can actually use them.
 	ifeq ($(WASM_THREADS),yes)
 		CXXFLAGS += -pthread
 		# pthreads require a fixed MAXIMUM_MEMORY together with ALLOW_MEMORY_GROWTH
-		LDFLAGS += -pthread -sPTHREAD_POOL_SIZE=8 \
-			-sMAXIMUM_MEMORY=2GB -sEXIT_RUNTIME=0
+		LDFLAGS += -pthread \
+			-s USE_PTHREADS=1 -s PROXY_TO_PTHREAD=1 \
+			-s PTHREAD_POOL_SIZE=1+navigator.hardwareConcurrency \
+			-s MAXIMUM_MEMORY=2GB -s EXIT_RUNTIME=0
 	else
 		CXXFLAGS += -DWASM_SINGLE_THREAD
 	endif

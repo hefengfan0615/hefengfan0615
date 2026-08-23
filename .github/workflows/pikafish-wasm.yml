@@ -46,6 +46,10 @@ jobs:
       # the reference Pikafish wasm branch. WASM_THREADS=yes links with
       # pthreads so the search runs off the main thread and the web page can
       # send "stop" to terminate it.
+      #
+      # The Makefile wasm section mirrors the reference wasm-multi* config:
+      #   -flto, -s USE_PTHREADS=1, -s PROXY_TO_PTHREAD=1 and a
+      #   PTHREAD_POOL_SIZE scaled to navigator.hardwareConcurrency.
       - name: Build WASM and package NNUE into data file (pikafish.data)
         run: |
           source $EMSDK_PATH/emsdk_env.sh
