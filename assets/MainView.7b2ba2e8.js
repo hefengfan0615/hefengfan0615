@@ -377,6 +377,11 @@ class Y1 {
                     // 达成隔离后此处即可正常加载多线程引擎，避免 SharedArrayBuffer 传输报错。
                     setTimeout(()=>{ this.initEngine() }, 400);
             else {
+                // 与多线程分支一致：未跨源隔离时先等待（首次加载/SW 尚未接管）。
+                // 已部署的 pikafish.js 是多线程构建，即使"single"路径也会创建
+                // pthread Worker 并传输 SharedArrayBuffer，未隔离必然报错，
+                // 因此这里必须也延迟到隔离后再初始化。
+                if (!self.crossOriginIsolated) return setTimeout(()=>{ this.initEngine() }, 400);
                 if (this.Mode = "single",
                 e === "single")
                     this.Engine = new W1;

@@ -30,20 +30,27 @@ self.addEventListener("install", function(event) {
     );
 });
 
-// 激活：清理旧缓存并接管所有页面
+// 激活：清理旧缓存并接管所有页面。
+// claim() 只允许"激活中或已激活"的 worker 调用，否则抛 InvalidStateError；
+// 升级竞态时可能走到该边界，必须捕获，避免变成未处理的 Promise 拒绝。
 self.addEventListener("activate", function(event) {
     event.waitUntil(
-        caches.keys().then(function(keys) {
-            return Promise.all(
+        (async function() {
+            const keys = await caches.keys();
+            await Promise.all(
                 keys.filter(function(k) {
                     return k !== CACHE;
                 }).map(function(k) {
                     return caches.delete(k);
                 })
             );
-        }).then(function() {
-            return self.clients.claim();
-        })
+            try {
+                await self.clients.claim();
+            } catch (e) {
+                // 非致命：控制权在后续导航中会被 SW 正常接管，这里不能向上抛。
+                console.warn("[xiangqi-sw] claim skipped:", e);
+            }
+        })()
     );
 });
 

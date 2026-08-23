@@ -24,23 +24,27 @@
                 sessionStorage.removeItem(KEY);
                 return;
             }
-            function maybeReload() {
+            var reloaded = false;
+            function tryIsolateAndReload() {
+                // 已隔离：本次会话无需再处理
                 if (window.crossOriginIsolated) {
                     sessionStorage.removeItem(KEY);
                     return;
                 }
-                if (navigator.serviceWorker.controller && !sessionStorage.getItem(KEY)) {
-                    sessionStorage.setItem(KEY, '1');
-                    location.reload();
-                }
+                // 一次性：仅隔离切换导出的那次刷新值得执行，避免刷新循环
+                if (reloaded || sessionStorage.getItem(KEY)) { return; }
+                reloaded = true;
+                sessionStorage.setItem(KEY, '1');
+                location.reload();
             }
-            navigator.serviceWorker.addEventListener('controllerchange', maybeReload);
+            navigator.serviceWorker.addEventListener('controllerchange', tryIsolateAndReload);
             navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function () {
-                // SW 安装并激活后，等待片刻再次判断隔离状态。
-                // 首次访问/首次安装时当前文档尚未被 SW 控制、也未带 COOP/COEP，
-                // 因此必须刷新一次，让文档经 SW 重新导航才能真正获得跨源隔离。
+                // 不依赖 controller（claim 升级竞态可能失败）：只要 SW 处于
+                // ready（已激活）态，location.reload() 作为一次新导航就会落在
+                // SW 作用域内，由 SW 响应并注入 COOP/COEP，从而获得跨源隔离，
+                // 这时多线程引擎才能正常创建 Worker 并传输 SharedArrayBuffer。
                 navigator.serviceWorker.ready.then(function () {
-                    setTimeout(function () { maybeReload(); }, 1200);
+                    setTimeout(tryIsolateAndReload, 300);
                 }).catch(function () {});
             }).catch(function () {});
         })();
