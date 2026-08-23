@@ -146,7 +146,7 @@ ifeq ($(ARCH), $(filter $(ARCH), \
                  x86-64-bmi2 x86-64-avx2 x86-64-sse41-popcnt x86-64-modern x86-64-ssse3 x86-64-sse3-popcnt \
                  x86-64 x86-32-sse41-popcnt x86-32-sse2 x86-32 ppc-64 ppc-64-altivec ppc-64-vsx ppc-32 e2k \
                  armv7 armv7-neon armv8 armv8-dotprod arm64-universal apple-silicon general-64 general-32 riscv64 \
-                 riscv64-rva23 riscv64-universal loongarch64 loongarch64-lsx loongarch64-lasx wasm32 wasm32-relaxed-simd))
+                 riscv64-rva23 riscv64-universal loongarch64 loongarch64-lsx loongarch64-lasx wasm32 wasm32-relaxed-simd wasm-multi-simd128-relaxed))
    SUPPORTED_ARCH=true
 else
    SUPPORTED_ARCH=false
@@ -405,6 +405,22 @@ ifeq ($(ARCH),wasm32-relaxed-simd)
 	ssse3 = yes
 	sse41 = yes
 	relaxedsimd = yes
+endif
+
+# Official-wasm-branch equivalent of `wasm-multi-simd128-relaxed`
+# (multithreaded + SIMD128 + relaxed SIMD). Mirrors the reference Makefile flag
+# set; USE_WASM_SIMD/USE_WASM_SIMD_RELAXED are defined for compatibility, while
+# the actual relaxed dot-product is enabled here through __wasm_relaxed_simd__
+# (see nnue/simd.h). Threading is selected at build time via WASM_THREADS=yes.
+ifeq ($(ARCH),wasm-multi-simd128-relaxed)
+	arch = wasm32
+	sse = yes
+	sse2 = yes
+	ssse3 = yes
+	sse41 = yes
+	relaxedsimd = yes
+	wasm_simd = yes
+	wasm_simd_relaxed = yes
 endif
 
 ifeq ($(ARCH),ppc-32)
@@ -875,6 +891,12 @@ ifeq ($(arch),wasm32)
 	# at link time via --preload-file, and the engine is exposed to the page
 	# through Module.send_command() (see emscripten/preamble.js).
 	CXXFLAGS += -msimd128 -DUSE_POPCNT -DUSE_SLOPPY_ATOMICS -flto
+	ifeq ($(wasm_simd),yes)
+		CXXFLAGS += -DUSE_WASM_SIMD
+		ifeq ($(wasm_simd_relaxed),yes)
+			CXXFLAGS += -DUSE_WASM_SIMD_RELAXED
+		endif
+	endif
 	LDFLAGS += \
 		-flto \
 		-sINITIAL_MEMORY=128MB -sALLOW_MEMORY_GROWTH -sSTACK_SIZE=3MB \

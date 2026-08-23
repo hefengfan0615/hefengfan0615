@@ -54,7 +54,7 @@ jobs:
         run: |
           source $EMSDK_PATH/emsdk_env.sh
           make -j$(nproc) build \
-            ARCH=wasm32-relaxed-simd \
+            ARCH=wasm-multi-simd128-relaxed \
             CXX=em++ \
             COMP=gcc \
             WASM_THREADS=yes \
