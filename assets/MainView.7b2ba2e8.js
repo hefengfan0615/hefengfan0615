@@ -31594,7 +31594,7 @@ const gy = "XIANGQIAI_COM_"
             },
             uiSettings: {
                 language: null,
-                showBoardLabel: !0,
+                showBoardLabel: !1,
                 playSound: !0,
                 animationTime: .2,
                 pureMode: !1,
@@ -31606,10 +31606,10 @@ const gy = "XIANGQIAI_COM_"
                     author: "Vincentzyx",
                     ext: "webp",
                     params: {
-                        gridWidth: 53.7,
-                        gridHeight: 53.7,
-                        offsetX: 33,
-                        offsetY: 33,
+                        gridWidth: 54.7,
+                        gridHeight: 54.3,
+                        offsetX: 31,
+                        offsetY: 30,
                         pieceScale: 1
                     }
                 },
@@ -31619,7 +31619,7 @@ const gy = "XIANGQIAI_COM_"
                     author: "Vincentzyx",
                     ext: "webp",
                     params: {
-                        pieceWidth: 50
+                        pieceWidth: 54
                     }
                 }
             },
