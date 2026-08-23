@@ -32849,12 +32849,20 @@ const gy = "XIANGQIAI_COM_"
         queryChessDb() {
             if (this.thinkingSettings.chessdb.query) {
                 let t = this.game.getFen();
-                t in this.chessDbRecords ? this.onChessDbResultChange(this.chessDbRecords[t]) : Q1.queryFen(this.game.getFen(), this.uiSettings.language).then(e=>{
-                    this.chessDbRecords[t] = e,
-                    this.onChessDbResultChange(e)
-                }
-                ).catch(e=>{}
-                )
+                if (t in this.chessDbRecords)
+                    this.onChessDbResultChange(this.chessDbRecords[t]);
+                else if (!navigator.onLine) {
+                    // 无网时不发起云库请求，同步写入空结果：避免 auto_move 流程里
+                    // doEngineAction 因等待云库而 return、拖慢引擎出招指令的执行。
+                    this.chessDbRecords[t] = { msg: "unknown", side: t.split(" ")[1] },
+                    this.onChessDbResultChange(this.chessDbRecords[t])
+                } else
+                    Q1.queryFen(this.game.getFen(), this.uiSettings.language).then(e=>{
+                        this.chessDbRecords[t] = e,
+                        this.onChessDbResultChange(e)
+                    }
+                    ).catch(e=>{}
+                    )
             }
         },
         onChessDbResultChange(t) {
