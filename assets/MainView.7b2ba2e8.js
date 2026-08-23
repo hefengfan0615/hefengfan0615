@@ -32912,11 +32912,9 @@ const gy = "XIANGQIAI_COM_"
                 if (this.thinkingSettings.chessdb.auto_move) {
                     let e = !1;
                     if (!(t in this.chessDbRecords))
-                        // 无网时不再等待云库结果：立即放行引擎出招指令，避免拖慢。
-                        if (!navigator.onLine || (t in this.chessDbFenQueryTime || (this.chessDbFenQueryTime[t] = new Date().getTime()), new Date().getTime() - this.chessDbFenQueryTime[t] > 2e3))
-                            e = !0;
-                        else
-                            return;
+                        // 完全不等待云库结果：无记录时立即交给引擎出招。
+                        // 云库自动走子仅对该局面已有缓存记录时生效。
+                        e = !0;
                     let r = this.chessDbRecords[t]
                       , i = !1;
                     if (!e && r && r.msg === "" && Array.isArray(r.moveList) && r.moveList.length > 0) {
