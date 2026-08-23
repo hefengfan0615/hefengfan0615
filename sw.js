@@ -58,14 +58,19 @@ self.addEventListener("activate", function(event) {
 });
 
 self.addEventListener("fetch", function(event) {
+    // 跨源请求（如云库 chessdb.cn）不拦截，直接交给浏览器原生处理：
+    // 离线时由页面侧自然失败，避免在本层抛 Uncaught 网络错误、拖累引擎流程。
+    // COEP/COOP 由文档级跨源隔离统一约束，这里无需也不应改写第三方响应头。
+    if (new URL(event.request.url).origin !== location.origin) {
+        return;
+    }
     if (event.request.cache === "only-if-cached" && event.request.mode !== "same-origin") {
         return;
     }
     event.respondWith(
         serve(event.request).catch(function(e) {
-            // 任何处理异常都回退到普通网络请求，绝不因 SW 异常拖垮资源加载
-            console.error(e);
-            return fetch(event.request);
+            // 兜底也失败时返回 504，绝不向上抛未捕获的 Promise 拒绝
+            return new Response(null, { status: 504, statusText: "Network Unavailable" });
         })
     );
 });

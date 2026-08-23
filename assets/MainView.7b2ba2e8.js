@@ -1592,6 +1592,9 @@ var q1 = wy(hp.exports)
 )(fp);
 var K1 = fp.exports;
 let j1 = async(t,e="zh-CN")=>{
+    // 无网环境下不再发起云库请求：直接返回 unknown，避免 net::ERR_FAILED
+    // 反复刷屏、并拖累引擎命令的接收与响应时间。云库仅在联网时查询。
+    if (!navigator.onLine) return { msg: "unknown", side: t.split(" ")[1] };
     let r = t.split(" ")[1]
       , n = (await ip.get("https://www.chessdb.cn/chessdb.php?action=queryall&learn=1&showall=0&board=" + encodeURI(t))).data.replace("\0", "");
     if (n === "invalid board")

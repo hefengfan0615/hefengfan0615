@@ -19,34 +19,61 @@
         // 使文档经 SW 重新导航从而带上 COOP/COEP，达成跨源隔离。
         (function () {
             if (!('serviceWorker' in navigator)) { return; }
-            var KEY = 'xiangqi-co-redirect';
+            var AUTO = 'xiangqi-co-auto';       // 1 = 上一次导航是本脚本注入的自动刷新
+            var COUNT = 'xiangqi-co-count';     // 注入式自动刷新的次数（用于兜住恶性循环）
+            var LAST = 'xiangqi-co-last';       // 上一次自动刷新的时间戳（简单限流）
+            var MIN_MS = 1500;                  // 自动刷新最小间隔
+            var MAX_AUTO = 4;                   // 自动刷新次数上限，防止隔离迟迟不来时无限刷新
+
+            // 已隔离：本次会话完成，清除全部遗留标记便于后续环境变化时重走引导
             if (window.crossOriginIsolated) {
-                sessionStorage.removeItem(KEY);
+                sessionStorage.removeItem(AUTO);
+                sessionStorage.removeItem(COUNT);
+                sessionStorage.removeItem(LAST);
                 return;
             }
-            var reloaded = false;
-            function tryIsolateAndReload() {
-                // 已隔离：本次会话无需再处理
+
+            // 判断本次加载是否由我们注入的自动刷新触发
+            var fromAuto = sessionStorage.getItem(AUTO) === '1';
+            var n = parseInt(sessionStorage.getItem(COUNT) || '0', 10);
+            sessionStorage.removeItem(AUTO); // 消费该标记
+            // 手动/全新导航与自动刷新无关：计数清零，允许立即重试，避免
+            // "多次刷新仍卡0%"——之前限流会把手动刷新也一并挡住。
+            if (!fromAuto) n = 0;
+            // 注入式自动刷新已达上限：停止循环，交由页面侧(MainView)持续等待引擎重建
+            if (fromAuto && n >= MAX_AUTO) return;
+
+            function tryReload() {
                 if (window.crossOriginIsolated) {
-                    sessionStorage.removeItem(KEY);
+                    sessionStorage.removeItem(AUTO);
+                    sessionStorage.removeItem(COUNT);
+                    sessionStorage.removeItem(LAST);
                     return;
                 }
-                // 一次性：仅隔离切换导出的那次刷新值得执行，避免刷新循环
-                if (reloaded || sessionStorage.getItem(KEY)) { return; }
-                reloaded = true;
-                sessionStorage.setItem(KEY, '1');
+                var now = Date.now();
+                var last = parseInt(sessionStorage.getItem(LAST) || '0', 10);
+                if (now - last < MIN_MS) return; // 简单限流，避免两次刷新过于密集
+                sessionStorage.setItem(LAST, String(now));
+                sessionStorage.setItem(AUTO, '1');
+                sessionStorage.setItem(COUNT, String(n + 1));
                 location.reload();
             }
-            navigator.serviceWorker.addEventListener('controllerchange', tryIsolateAndReload);
-            navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function () {
-                // 不依赖 controller（claim 升级竞态可能失败）：只要 SW 处于
-                // ready（已激活）态，location.reload() 作为一次新导航就会落在
-                // SW 作用域内，由 SW 响应并注入 COOP/COEP，从而获得跨源隔离，
-                // 这时多线程引擎才能正常创建 Worker 并传输 SharedArrayBuffer。
-                navigator.serviceWorker.ready.then(function () {
-                    setTimeout(tryIsolateAndReload, 300);
+
+            if (navigator.serviceWorker.controller) {
+                // SW 已接管但尚未隔离：手动刷新必走此分支，可立即重试恢复；
+                // 若是我们自己的自动刷新，稍等片刻让 SW 完成 headers 注入再试。
+                if (fromAuto) { setTimeout(tryReload, MIN_MS); }
+                else { tryReload(); }
+            } else {
+                // 首次加载，SW 尚未接管：注册后由 controllerchange 触发，
+                // 并保留 ready 兜底（延迟稍重试一次，确保到达 SW 作用域）。
+                navigator.serviceWorker.addEventListener('controllerchange', tryReload);
+                navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function () {
+                    navigator.serviceWorker.ready.then(function () {
+                        setTimeout(tryReload, 200);
+                    }).catch(function () {});
                 }).catch(function () {});
-            }).catch(function () {});
+            }
         })();
     </script>
   <script type="module" crossorigin src="/assets/index.b58f0dd0.js"></script>
