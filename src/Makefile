@@ -76,7 +76,13 @@ BINDIR = $(PREFIX)/bin
 PGOBENCH = $(RUN_PREFIX) ./$(EXE) bench
 
 ### Source and object files
-SRCS = $(shell find -L . \( -path './universal' -o -path './temp_builds' \) -prune -o \( -name '*.cpp' -o -name '*.S' \) -print | sed 's|^\./||')
+# Assembly (*.S) is only used for native x86-64 (e.g. zstd's huf_decompress_amd64.S).
+# WebAssembly cannot assemble those, so drop *.S whenever the target is wasm.
+ifeq (wasm,$(findstring wasm,$(ARCH)))
+	SRCS = $(shell find -L . \( -path './universal' -o -path './temp_builds' \) -prune -o -name '*.cpp' -print | sed 's|^\./||')
+else
+	SRCS = $(shell find -L . \( -path './universal' -o -path './temp_builds' \) -prune -o \( -name '*.cpp' -o -name '*.S' \) -print | sed 's|^\./||')
+endif
 
 HEADERS = $(shell find -L . \( -path './universal' -o -path './temp_builds' \) -prune -o -name '*.h' -print | sed 's|^\./||')
 
@@ -746,9 +752,15 @@ ifeq ($(optimize),yes)
 	endif
 
 	ifeq ($(comp),clang)
-		clangmajorversion := $(shell $(CXX) -dumpversion 2>/dev/null | cut -f1 -d.)
-		ifeq ($(shell expr $(clangmajorversion) \< 16),1)
-			CXXFLAGS += -fexperimental-new-pass-manager
+		ifeq ($(arch),wasm32)
+			# Emscripten's clang reports its emsdk version (e.g. 3.1.64), which is
+			# always < 16 here, but the -fexperimental-new-pass-manager flag was
+			# removed from clang 16+ and is rejected by the em++ frontend. Skip it.
+		else
+			clangmajorversion := $(shell $(CXX) -dumpversion 2>/dev/null | cut -f1 -d.)
+			ifeq ($(shell expr $(clangmajorversion) \< 16),1)
+				CXXFLAGS += -fexperimental-new-pass-manager
+			endif
 		endif
 	endif
 endif
@@ -890,7 +902,7 @@ ifeq ($(arch),wasm32)
 	# The NNUE network is packaged into a standalone data file (pikafish.data)
 	# at link time via --preload-file, and the engine is exposed to the page
 	# through Module.send_command() (see emscripten/preamble.js).
-	CXXFLAGS += -msimd128 -DUSE_POPCNT -DUSE_SLOPPY_ATOMICS -flto
+	CXXFLAGS += -msimd128 -DUSE_POPCNT -DUSE_SLOPPY_ATOMICS -flto -DZSTD_DISABLE_ASM
 	ifeq ($(wasm_simd),yes)
 		CXXFLAGS += -DUSE_WASM_SIMD
 		ifeq ($(wasm_simd_relaxed),yes)

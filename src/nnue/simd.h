@@ -389,8 +389,25 @@ inline __m128i vec_convert_8_16(u64 x) {
     return _mm_cvtsi128_si32(sum) + bias;
 }
 
+#if defined(__wasm_relaxed_simd__) && defined(USE_WASM_SIMD)
+    // On WebAssembly, __m128i is the SIMD128 vector type (v128_t), so we can feed
+    // the accumulator dot-product straight into the single-instruction relaxed
+    // SIMD dot product (i8x16.relaxed_dot_i8x16_i7x16_add_s). Operand order must
+    // be (a = i8x16 signed weights, b = i8x16 unsigned inputs masked to 7 bits).
+    [[maybe_unused]] static __m128i
+    wasm_i32x4_relaxed_dot_i8x16_i7x16_add(__m128i b, __m128i a, __m128i acc) {
+        return __builtin_wasm_relaxed_dot_i8x16_i7x16_add_s_i32x4(b, a, acc);
+    }
+
+    // Horizontal reduction of a full 16-byte i32x4 lane into a scalar (m128_hadd).
+    [[maybe_unused]] static int wasm_i32x4_hadd(__m128i sum, int bias) {
+        return wasm_i32x4_extract_lane(sum, 0) + wasm_i32x4_extract_lane(sum, 1)
+             + wasm_i32x4_extract_lane(sum, 2) + wasm_i32x4_extract_lane(sum, 3) + bias;
+    }
+#endif
+
 [[maybe_unused]] static void m128_add_dpbusd_epi32(__m128i& acc, __m128i a, __m128i b) {
-    #if defined(__wasm_relaxed_simd__)
+    #if defined(__wasm_relaxed_simd__) && defined(USE_WASM_SIMD)
     acc = wasm_i32x4_relaxed_dot_i8x16_i7x16_add(b, a, acc);
     #else
     __m128i product0 = _mm_maddubs_epi16(a, b);
