@@ -36,9 +36,12 @@
             }
             navigator.serviceWorker.addEventListener('controllerchange', maybeReload);
             navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function () {
-                if (navigator.serviceWorker.controller) {
-                    navigator.serviceWorker.ready.then(maybeReload).catch(function () {});
-                }
+                // SW 安装并激活后，等待片刻再次判断隔离状态。
+                // 首次访问/首次安装时当前文档尚未被 SW 控制、也未带 COOP/COEP，
+                // 因此必须刷新一次，让文档经 SW 重新导航才能真正获得跨源隔离。
+                navigator.serviceWorker.ready.then(function () {
+                    setTimeout(function () { maybeReload(); }, 1200);
+                }).catch(function () {});
             }).catch(function () {});
         })();
     </script>

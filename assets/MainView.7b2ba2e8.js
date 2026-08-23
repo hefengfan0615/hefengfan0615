@@ -349,27 +349,33 @@ class Y1 {
             this.Ready = !1;
             let e = this.WasmType;
             if (e.indexOf("multi") !== -1)
-                this.Mode = "multi",
-                $1.import(ya + "/pikafish.js").then(()=>{
-                    console.log(window.location.origin + ya + "/"),
-                    self.Pikafish({
-                        read_stdout: this.onReceiveOutput,
-                        onExit: this.onExit,
-                        locateFile: r=>window.location.origin + ya + "/" + r,
-                        setStatus: r=>{
-                            this.DownloadEvent != null && this.DownloadEvent(r)
+                if (self.crossOriginIsolated)
+                    this.Mode = "multi",
+                    $1.import(ya + "/pikafish.js").then(()=>{
+                        console.log(window.location.origin + ya + "/"),
+                        self.Pikafish({
+                            read_stdout: this.onReceiveOutput,
+                            onExit: this.onExit,
+                            locateFile: r=>window.location.origin + ya + "/" + r,
+                            setStatus: r=>{
+                                this.DownloadEvent != null && this.DownloadEvent(r)
+                            }
+                        }).then(r=>{
+                            this.Engine = r,
+                            setTimeout(()=>{
+                                this.sendCommand("uci"),
+                                this.setOptionList(this.EngineOptions)
+                            }
+                            , 100)
                         }
-                    }).then(r=>{
-                        this.Engine = r,
-                        setTimeout(()=>{
-                            this.sendCommand("uci"),
-                            this.setOptionList(this.EngineOptions)
-                        }
-                        , 100)
+                        )
                     }
-                    )
-                }
-                );
+                    );
+                else
+                    // 尚未跨源隔离（首次加载/SW 尚未接管），延迟重试。
+                    // 隔离引导脚本会在后台刷新页面使文档带上 COOP/COEP，
+                    // 达成隔离后此处即可正常加载多线程引擎，避免 SharedArrayBuffer 传输报错。
+                    setTimeout(()=>{ this.initEngine() }, 400);
             else {
                 if (this.Mode = "single",
                 e === "single")

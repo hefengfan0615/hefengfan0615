@@ -1,9 +1,9 @@
 // Fengfan Xiangqi Service Worker
 // 缓存优先加载，刷新后依靠离线资源快速启动；
 // 同时为所有响应注入跨源隔离头，保证多线程 WASM 引擎（SharedArrayBuffer）可用。
-// v5: 对无效/opaque/状态码越界的响应不再重构，避免 new Response(status=0) 抛 RangeError。
+// v6: 引擎多线程 init 延迟到跨源隔离后再加载；缓存版本提升以强制清理旧缓存并换新 HTML/JS。
 
-const CACHE = "fengfan-xiangqi-v5";
+const CACHE = "fengfan-xiangqi-v6";
 
 // 预缓存应用外壳与引擎文件，方便下一次直接/离线快速加载
 const PRECACHE = [
