@@ -1,18 +1,21 @@
 // Fengfan Xiangqi Service Worker
 // 缓存优先加载，刷新后依靠离线资源快速启动；
 // 同时为所有响应注入跨源隔离头，保证多线程 WASM 引擎（SharedArrayBuffer）可用。
-// v6: 引擎多线程 init 延迟到跨源隔离后再加载；缓存版本提升以强制清理旧缓存并换新 HTML/JS。
+// v7: 不再在 install 预缓存 ~50MB 的引擎数据文件 pikafish.data。
+// 之前它会在 install 阶段阻塞激活(ready)，导致跨源隔离的自动刷新迟迟不触发、
+// 引擎进度长时间卡在 0%；改为运行时首次下载时流式缓存并实时上报进度。
+// 缓存版本提升以强制清理旧缓存并换新 HTML/JS。
 
-const CACHE = "fengfan-xiangqi-v6";
+const CACHE = "fengfan-xiangqi-v7";
 
-// 预缓存应用外壳与引擎文件，方便下一次直接/离线快速加载
+// 预缓存应用外壳与小型引擎脚本（.js/.wasm 只有 ~1MB），
+// 大型 pikafish.data 走运行时缓存（见 serve()），避免阻塞 install。
 const PRECACHE = [
     "/xiangqiai.html",
     "/assets/index.b58f0dd0.js",
     "/assets/index.65062099.css",
     "/wasm/pikafish.js",
-    "/wasm/pikafish.wasm",
-    "/wasm/pikafish.data"
+    "/wasm/pikafish.wasm"
 ];
 
 // 安装：预缓存全部资源并立即接管（allSettled 保证任一失败也不会阻塞激活）

@@ -32697,7 +32697,7 @@ const gy = "XIANGQIAI_COM_"
                     let e = t.split("(")[1].split(")")[0].split("/")
                       , r = parseInt(e[0])
                       , i = parseInt(e[1]);
-                    this.downloadProgress = r / i
+                    this.downloadProgress = (r >= 0 && i > 0) ? Math.min(r / i, 1) : 0
                 } else
                     t.includes("Running") && (this.downloadProgress = 1)
         },
