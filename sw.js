@@ -119,7 +119,12 @@ async function serve(request) {
 // 这样刷新中途退出不会留下半截缓存，彻底杜绝进度卡在 0。
 async function downloadAndStore(request, cache) {
     const url = new URL(request.url);
-    const response = await fetch(request);
+    // cache:"reload" 绕过浏览器 HTTP/磁盘缓存，直接回源拉取完整文件。
+    // 关键：首次下载若被退出网页打断，浏览器 HTTP 层可能残留一个"响应头是完整
+    // Content-Length、body 却是半截"的坏缓存；下次请求若命中它，页面收到的字节
+    // 停在某个进度就不再有数据到达(进度卡死)，只有强制 reload 才能彻底绕开，
+    // 保证每次都从网络上取得完整文件。
+    const response = await fetch(request, { cache: "reload" });
     if (!isValidResponse(response)) {
         return withIsolationHeaders(response);
     }
