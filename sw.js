@@ -2,26 +2,31 @@
 // 缓存优先加载，刷新后依靠离线资源快速启动；
 // 同时为所有响应注入跨源隔离头，保证多线程 WASM 引擎（SharedArrayBuffer）可用。
 //
-// v8: 引擎文件（pikafish.js / .wasm / .data）采用
-//   "首次成功缓存 + 缓存优先(秒开) + 后台无感校验更新(stale-while-revalidate)" 策略：
-//   - 首次加载成功后写入持久引擎缓存，后续打开直接复用缓存，秒开且可离线；
-//   - 命中缓存先立即返回，再后台用 ETag/Last-Modified 做条件请求(304 零流量)自动检测版本，
-//     发现引擎更新则无感替换本地缓存，下次打开即用最新版，且绝不阻塞首次加载；
-//   - 引擎缓存与应用外壳缓存解耦，升级 sw 不会清掉已缓存的 ~50MB 引擎数据。
-//   - ~50MB 的 pikafish.data 只在运行时首次下载时流式缓存，绝不放进 install 预缓存，
-//     避免 install 阻塞激活(ready)导致引擎进度卡在 0%。
+// v9: 引擎文件与前端文件统一采用"逐文件"离线缓存策略：
+//   - 每个文件（引擎 pikafish.js/.wasm/.data，以及前端 xiangqiai.html/assets/*）
+//     独立缓存；仓库里内容未变化的文件，始终继续引用本地缓存不重新下载；
+//     只有内容真正变化的文件，才会被后台无感校验发现并单独更新。
+//   - 命中任意缓存先立即返回（秒开），随后后台对每个文件做 ETag/Last-Modified
+//     指纹比对（HEAD 请求，零流量）：
+//       指纹一致 -> 什么都不做，继续用缓存；
+//       指纹变化 -> 只下载该文件并替换本地缓存；
+//       文件在仓库被删除/改名(404) -> 清掉对应缓存条目。
+//   - 全程不 await 到主响应，绝不阻塞首次加载。
+//   - ~50MB 的 pikafish.data 只在运行时首次下载时缓冲提交，绝不放进 install 预缓存，
+//     且只有"完整接收 && 未被中断"才写缓存，避免进度卡在 0%。
 
-const APP_CACHE = "fengfan-xiangqi-app-v8";
+const APP_CACHE = "fengfan-xiangqi-app-v9";
 const ENGINE_CACHE = "fengfan-xiangqi-engine";
 
-// 应用外壳：体积小，随版本号提升强制刷新。
+// 应用外壳：体积小，安装时预缓存用于离线秒开；版本更新由逐文件校验接管，
+// 不再依赖整体版本号强制刷新，只更新实际变化的那几个文件。
 const PRECACHE = [
     "/xiangqiai.html",
     "/assets/index.b58f0dd0.js",
     "/assets/index.65062099.css"
 ];
 
-// 引擎文件：体积大（.data 约 50MB），持久缓存并后台校验更新。
+// 引擎文件：体积大（.data 约 50MB），持久缓存；同样按文件校验更新。
 const ENGINE_FILES = [
     "/wasm/pikafish.js",
     "/wasm/pikafish.wasm",
@@ -87,53 +92,32 @@ self.addEventListener("fetch", function(event) {
     );
 });
 
+// 统一分发：引擎与前端走同一套"缓存优先 + 逐文件后台校验"逻辑，
+// 唯一差别是引擎文件在命中前还会做完整性校验（防止半截/损坏缓存导致卡 0）。
 async function serve(request) {
     const url = new URL(request.url);
-    if (isEngineRequest(url)) {
-        return serveEngine(request);
-    }
-
-    // 应用外壳：体积小，命中秒开/未命中直接网络。
-    const cache = await caches.open(APP_CACHE);
+    const engine = isEngineRequest(url);
+    const cache = await caches.open(engine ? ENGINE_CACHE : APP_CACHE);
     const cached = await cache.match(request);
-    if (cached) {
-        return withIsolationHeaders(cached);
-    }
-    const response = await fetch(request);
-    if (isValidResponse(response) && response.type === "basic") {
-        cache.put(request, response.clone()).catch(function(e) {
-            console.error("[xiangqi-sw] cache.put failed:", e);
-        });
-    }
-    return withIsolationHeaders(response);
-}
 
-// 引擎文件入口：优先命中"已验证"的完整缓存（秒开）；
-// 缺失/不可信/半截 的缓存一律丢弃并重新完整下载，绝不返回损坏数据导致卡 0。
-async function serveEngine(request) {
-    const url = new URL(request.url);
-    const cache = await caches.open(ENGINE_CACHE);
-    const cached = await cache.match(request);
     if (cached) {
-        const meta = await getEngineMeta();
-        const rec = meta[url.pathname];
-        if (rec && rec.verified === true && rec.len > 0) {
-            // 已验证的完整缓存：秒开 + 后台无感版本校验。
-            revalidateEngine(request);
+        const rec = await getMetaRecord(url.pathname);
+        if (engine && !(rec && rec.verified === true && rec.len > 0)) {
+            // 引擎缓存存在但无法确认完整（旧版本/半截）-> 丢弃后重新完整下载。
+            try { await cache.delete(request); } catch (e) { /* 忽略 */ }
+        } else {
+            // 命中缓存：先秒开，再后台对该文件做指纹校验，只更新变化的那一个文件。
+            revalidateFile(request, engine);
             return withIsolationHeaders(cached);
         }
-        // 旧版本写入的未验证明细：可能是半截/损坏，丢弃后重新完整下载，避免"卡 0"。
-        try {
-            await cache.delete(request);
-        } catch (e) { /* 忽略删除失败 */ }
     }
-    return cacheEngineFromNetwork(request, cache);
+    return downloadAndStore(request, cache);
 }
 
-// 首次下载引擎：一边把数据流转发给页面，一边在 SW 内缓冲；
-// 只有"完整接收 && 未被中断(刷新/关页)"时才将完整副本写入缓存。
-// 这样刷新中途退出不会留下半截缓存条目，下次刷新仍会重新完整加载，进度不会卡在 0。
-async function cacheEngineFromNetwork(request, cache) {
+// 下载并缓存一个文件：一边把数据流转发给页面，一边在 SW 内缓冲；
+// 只有"完整接收 && 未被中断(刷新/关页)"时，才把完整副本和 verified 标记写入缓存。
+// 这样刷新中途退出不会留下半截缓存，彻底杜绝进度卡在 0。
+async function downloadAndStore(request, cache) {
     const url = new URL(request.url);
     const response = await fetch(request);
     if (!isValidResponse(response)) {
@@ -172,9 +156,7 @@ async function cacheEngineFromNetwork(request, cache) {
                         statusText: response.statusText,
                         headers: headers
                     }));
-                    const meta = await getEngineMeta();
-                    meta[url.pathname] = { verified: true, len: received, contentLength: contentLength };
-                    await saveEngineMeta(meta);
+                    await markVerified(url.pathname, received);
                 }
             } catch (e) {
                 if (!aborted) {
@@ -198,12 +180,12 @@ async function cacheEngineFromNetwork(request, cache) {
     return withIsolationHeaders(forwarded);
 }
 
-// ---- 引擎缓存"完整校验"元数据 ----
-// 只有在引擎文件被完整下载并成功提交后才能被标记为 verified=true。
-// 否则（半截/中断/旧版本写入）SW 会视为不可信，重新完整下载，杜绝"卡 0"。
-const META_KEY = "/__xiangqi_engine_meta__";
+// ---- 缓存"完整校验"元数据 ----
+// 每个文件只有完整下载成功后才被标记 verified=true；
+// 否则视为不可信（旧版本/半截），引擎文件会被丢弃重新下载。
+const META_KEY = "/__xiangqi_cache_meta__";
 
-async function getEngineMeta() {
+async function getCacheMeta() {
     try {
         const cache = await caches.open(ENGINE_CACHE);
         const r = await cache.match(META_KEY);
@@ -216,7 +198,7 @@ async function getEngineMeta() {
     }
 }
 
-async function saveEngineMeta(meta) {
+async function saveCacheMeta(meta) {
     try {
         const cache = await caches.open(ENGINE_CACHE);
         await cache.put(META_KEY, new Response(JSON.stringify(meta), {
@@ -227,13 +209,25 @@ async function saveEngineMeta(meta) {
     }
 }
 
-// 后台无感校验引擎版本（stale-while-revalidate）：
-// 命中缓存先秒开；这里用 HEAD 请求（零流量、无 body）拿到服务器当前引擎的
-// 版本指纹（ETag/Last-Modified），与本地缓存对比：
-//   - 一致 -> 什么都不做，零流量；
-//   - 变化（或本地无缓存）-> 后台全量下载新版并更新缓存，下次打开即用新版；
+async function getMetaRecord(pathname) {
+    const meta = await getCacheMeta();
+    return meta[pathname] || null;
+}
+
+async function markVerified(pathname, len) {
+    const meta = await getCacheMeta();
+    meta[pathname] = { verified: true, len: len, t: Date.now() };
+    await saveCacheMeta(meta);
+}
+
+// ---- 逐文件后台校验更新（stale-while-revalidate）----
+// 命中缓存先秒开；这里对【每一个文件】用 HEAD 请求（零流量）拿到服务器当前
+// ETag/Last-Modified，与本地缓存指纹比对：
+//   - 一致                     -> 不更新，继续引用缓存（未变化的文件不重新下载）；
+//   - 指纹变化/本地无缓存       -> 只把变化的那一个文件后台下载并替换；
+//   - 文件在仓库删除/改名(404/410) -> 清掉对应缓存条目，避免继续引用已不存在的旧文件。
 // 全程不 await 到主响应，绝不阻塞首次加载。
-const revalidatingEngine = new Set();
+const revalidating = new Set();
 
 function versionFingerprint(response) {
     if (!response) {
@@ -242,38 +236,48 @@ function versionFingerprint(response) {
     return response.headers.get("etag") || response.headers.get("last-modified") || null;
 }
 
-async function revalidateEngine(request) {
-    const key = request.url;
-    if (revalidatingEngine.has(key)) {
+async function revalidateFile(request, engine) {
+    const url = new URL(request.url);
+    const key = url.pathname + url.search;
+    if (revalidating.has(key)) {
         return;
     }
-    revalidatingEngine.add(key);
+    revalidating.add(key);
     try {
-        const cache = await caches.open(ENGINE_CACHE);
+        const cache = await caches.open(engine ? ENGINE_CACHE : APP_CACHE);
         const cached = await cache.match(request);
         const head = await fetch(request.url, { method: "HEAD", cache: "reload" });
-        if (!head.ok) {
+        if (head.status === 404 || head.status === 410) {
+            // 文件已在仓库删除/改名：移除本地缓存，避免继续用旧文件。
+            if (cached) {
+                try { await cache.delete(request); } catch (e) { /* 忽略 */ }
+                try {
+                    const meta = await getCacheMeta();
+                    delete meta[url.pathname];
+                    await saveCacheMeta(meta);
+                } catch (e) { /* 忽略 */ }
+            }
             return;
+        }
+        if (!head.ok) {
+            return; // 网络/服务器异常：保留现有缓存，下次再校验。
         }
         const serverV = versionFingerprint(head);
         const cachedV = versionFingerprint(cached);
         if (cached && serverV && serverV === cachedV) {
-            return; // 版本未变化，无需更新
+            return; // 该文件未变化，继续使用缓存。
         }
+        // 该文件发生了变化（或本地无指纹）：只更新这一个文件。
         const fresh = await fetch(request.url, { cache: "reload" });
         if (fresh.ok && fresh.type === "basic") {
-            // 后台独立完整下载：缓冲确认完整后提交，并刷新"已验证"标记。
             const bytes = await readAllBytes(fresh.body);
             await cache.put(request, new Response(bytes, { headers: fresh.headers }));
-            const url = new URL(request.url);
-            const meta = await getEngineMeta();
-            meta[url.pathname] = { verified: true, len: bytes.byteLength || bytes.length, contentLength: bytes.byteLength || bytes.length };
-            await saveEngineMeta(meta);
+            await markVerified(url.pathname, bytes.byteLength || bytes.length);
         }
     } catch (e) {
         // 网络失败：保留现有缓存，静默忽略，下次打开再校验。
     } finally {
-        revalidatingEngine.delete(key);
+        revalidating.delete(key);
     }
 }
 
@@ -301,7 +305,7 @@ async function readAllBytes(body) {
 // 迁移：升级 sw 时把旧缓存里的引擎文件搬运到持久缓存，
 // 避免用户升级后重新下载 ~50MB 引擎数据、丧失"秒开"。
 // 注意：旧缓存条目无法验证是否完整，故迁移后不被标记 verified，
-// 首次打开会重新下载一次并标记，确保绝不会复现"卡 0"的损坏缓存。
+// 引擎首次打开会重新下载一次并标记，确保绝不会复现"卡 0"的损坏缓存。
 async function migrateEngineCache() {
     const engineCache = await caches.open(ENGINE_CACHE);
     const keys = await caches.keys();
