@@ -20,10 +20,14 @@ const ENGINE_CACHE = "fengfan-xiangqi-engine";
 
 // 应用外壳：体积小，安装时预缓存用于离线秒开；版本更新由逐文件校验接管，
 // 不再依赖整体版本号强制刷新，只更新实际变化的那几个文件。
+// version.json 记录所有被缓存文件的内容哈希（sha256），部署时由 CI 生成：
+//   只改前端 -> 只有前端文件的哈希变化 -> 只重下前端文件；
+//   只改引擎 -> 只有引擎文件的哈希变化 -> 只重下引擎文件。
 const PRECACHE = [
     "/xiangqiai.html",
     "/assets/index.b58f0dd0.js",
-    "/assets/index.65062099.css"
+    "/assets/index.65062099.css",
+    "/version.json"
 ];
 
 // 引擎文件：体积大（.data 约 50MB），持久缓存；同样按文件校验更新。
@@ -161,7 +165,8 @@ async function downloadAndStore(request, cache) {
                         statusText: response.statusText,
                         headers: headers
                     }));
-                    await markVerified(url.pathname, received);
+                    const fullHash = await sha256Hex(full);
+                    await markVerified(url.pathname, received, fullHash);
                 }
             } catch (e) {
                 if (!aborted) {
@@ -219,20 +224,64 @@ async function getMetaRecord(pathname) {
     return meta[pathname] || null;
 }
 
-async function markVerified(pathname, len) {
+async function markVerified(pathname, len, hash) {
     const meta = await getCacheMeta();
-    meta[pathname] = { verified: true, len: len, t: Date.now() };
+    meta[pathname] = { verified: true, len: len, t: Date.now(), hash: hash || null };
     await saveCacheMeta(meta);
 }
 
-// ---- 逐文件后台校验更新（stale-while-revalidate）----
-// 命中缓存先秒开；这里对【每一个文件】用 HEAD 请求（零流量）拿到服务器当前
-// ETag/Last-Modified，与本地缓存指纹比对：
-//   - 一致                     -> 不更新，继续引用缓存（未变化的文件不重新下载）；
-//   - 指纹变化/本地无缓存       -> 只把变化的那一个文件后台下载并替换；
-//   - 文件在仓库删除/改名(404/410) -> 清掉对应缓存条目，避免继续引用已不存在的旧文件。
+// ---- 内容哈希（sha256）----
+// 用真实内容哈希判定"文件是否真的变化"，取代 mtime 型 ETag/Last-Modified。
+// 这样"只改前端 -> 只重下前端；只改引擎 -> 只重下引擎"，部署刷新 mtime 不会误触发。
+async function sha256Hex(data) {
+    const buf = (data instanceof Uint8Array) ? data : new Uint8Array(data);
+    const digest = await crypto.subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(digest)).map(function(b) {
+        return b.toString(16).padStart(2, "0");
+    }).join("");
+}
+
+// ---- 逐文件按"内容哈希清单"后台校验更新（stale-while-revalidate）----
+// 命中缓存先秒开；这里对【每一个文件】，引入由 CI 生成的 /version.json：
+//   - 清单里该文件有 sha256 -> 与本地缓存记录的内容哈希比对：
+//       * 相同 -> 该文件没变，继续用缓存（不重下）；
+//       * 不同 -> 只重下这一个文件并替换。
+//   - 清单里没有该文件（旧版/未收录）-> 退回 ETag/Last-Modified 判定。
+//   - 文件在仓库删除/改名(404/410) -> 清掉对应缓存条目。
+// 内容哈希与 mtime 无关：部署刷新时间戳不会误触发下载，
+// 真正做到"只改前端 -> 只更新前端缓存；只改引擎 -> 只更新引擎缓存"。
 // 全程不 await 到主响应，绝不阻塞首次加载。
 const revalidating = new Set();
+
+const MANIFEST_PATH = "/version.json";
+
+// 读取已缓存的版本清单；没有则返回 null（回退 ETag 判定）。
+async function getManifest() {
+    try {
+        const cache = await caches.open(APP_CACHE);
+        const r = await cache.match(MANIFEST_PATH);
+        if (!r) {
+            return null;
+        }
+        return await r.json().catch(function() { return null; }) || null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// 后台刷新版本清单（体积小，零负担）。失败保留现有清单。
+async function refreshManifest() {
+    try {
+        const fresh = await fetch(MANIFEST_PATH, { cache: "reload" });
+        if (fresh.ok && fresh.type === "basic") {
+            const bytes = await readAllBytes(fresh.body);
+            const cache = await caches.open(APP_CACHE);
+            await cache.put(MANIFEST_PATH, new Response(bytes, { headers: fresh.headers }));
+        }
+    } catch (e) {
+        // 忽略：本次拿不到清单就以现有缓存判定。
+    }
+}
 
 function versionFingerprint(response) {
     if (!response) {
@@ -251,9 +300,10 @@ async function revalidateFile(request, engine) {
     try {
         const cache = await caches.open(engine ? ENGINE_CACHE : APP_CACHE);
         const cached = await cache.match(request);
+
+        // 先用 HEAD 判断文件是否已被删除（不触发下载）。
         const head = await fetch(request.url, { method: "HEAD", cache: "reload" });
         if (head.status === 404 || head.status === 410) {
-            // 文件已在仓库删除/改名：移除本地缓存，避免继续用旧文件。
             if (cached) {
                 try { await cache.delete(request); } catch (e) { /* 忽略 */ }
                 try {
@@ -267,17 +317,49 @@ async function revalidateFile(request, engine) {
         if (!head.ok) {
             return; // 网络/服务器异常：保留现有缓存，下次再校验。
         }
-        const serverV = versionFingerprint(head);
-        const cachedV = versionFingerprint(cached);
-        if (cached && serverV && serverV === cachedV) {
+
+        // 读取清单，尝试用"内容哈希"精确判定这个文件是否真的变了。
+        await refreshManifest();
+        const manifest = await getManifest();
+        const manifestHash = manifest ? (manifest[url.pathname] || null) : null;
+
+        let needUpdate = false;
+        if (manifestHash) {
+            // 有内容哈希：拿到本地缓存的内容哈希再比对。
+            let rec = await getMetaRecord(url.pathname);
+            let cachedHash = (rec && rec.hash) || null;
+            if (!cachedHash && cached) {
+                // 旧版缓存未记录哈希 -> 直接从缓存体算一次（本地，不重新下载），并存下来。
+                cachedHash = await sha256Hex(await readAllBytes(cached.body));
+                rec = Object.assign({}, rec || {}, {
+                    verified: true,
+                    len: 0,
+                    t: Date.now(),
+                    hash: cachedHash
+                });
+                const meta = await getCacheMeta();
+                meta[url.pathname] = rec;
+                await saveCacheMeta(meta);
+            }
+            needUpdate = !cached || cachedHash !== manifestHash;
+        } else {
+            // 无清单（旧版）：退回 ETag/Last-Modified 判定。
+            const serverV = versionFingerprint(head);
+            const cachedV = versionFingerprint(cached);
+            needUpdate = !(cached && serverV && serverV === cachedV);
+        }
+
+        if (!needUpdate) {
             return; // 该文件未变化，继续使用缓存。
         }
-        // 该文件发生了变化（或本地无指纹）：只更新这一个文件。
+
+        // 该文件内容真的变了（或本地不可用）：只更新这一个文件。
         const fresh = await fetch(request.url, { cache: "reload" });
         if (fresh.ok && fresh.type === "basic") {
             const bytes = await readAllBytes(fresh.body);
             await cache.put(request, new Response(bytes, { headers: fresh.headers }));
-            await markVerified(url.pathname, bytes.byteLength || bytes.length);
+            const hash = await sha256Hex(bytes);
+            await markVerified(url.pathname, bytes.byteLength || bytes.length, hash);
         }
     } catch (e) {
         // 网络失败：保留现有缓存，静默忽略，下次打开再校验。

@@ -82,6 +82,37 @@ jobs:
           cp -f emscripten/test.js       ../wasm/
           ls -lh ../wasm/
 
+      - name: Generate content hash manifest (version.json)
+        working-directory: src
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          root = ".."
+          files = [
+              "wasm/pikafish.js",
+              "wasm/pikafish.wasm",
+              "wasm/pikafish.data",
+              "xiangqiai.html",
+              "sw.js",
+          ]
+          worker = "wasm/pikafish.worker.js"
+          if os.path.exists(os.path.join(root, worker)):
+              files.append(worker)
+          for d, _, fs in os.walk(os.path.join(root, "assets")):
+              for f in fs:
+                  files.append(os.path.relpath(os.path.join(d, f), root).replace("\\", "/"))
+          manifest = {}
+          for p in files:
+              fp = os.path.join(root, p)
+              if os.path.exists(fp):
+                  with open(fp, "rb") as fh:
+                      manifest["/" + p] = hashlib.sha256(fh.read()).hexdigest()
+          with open(os.path.join(root, "version.json"), "w") as fh:
+              json.dump(manifest, fh, indent=2, sort_keys=True)
+          print(json.dumps(manifest, indent=2, sort_keys=True))
+          PY
+          ls -lh ../version.json
+
       # Step 2: test exactly like the web page loads the engine
       # (Pikafish().then(...); engine.send_command(...)):
       #   - uci / isready handshake (NNUE data file is loaded from pikafish.data)
@@ -101,6 +132,6 @@ jobs:
           git config user.name "Pikafish Bot"
           git config user.email "pikafish-bot@github.com"
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git add -f wasm/
-          git commit -m "Update WASM build (multithreaded, NNUE data file) [skip ci]" || echo "No changes to commit"
+          git add -f wasm/ version.json
+          git commit -m "Update WASM build + content manifest (multithreaded, NNUE data file) [skip ci]" || echo "No changes to commit"
           git push
