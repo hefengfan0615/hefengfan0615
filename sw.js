@@ -50,12 +50,50 @@ self.addEventListener("install", function(event) {
                 PRECACHE.map(function(url) {
                     return cache.add(url);
                 })
-            );
+            ).then(function() {
+                // 首次安装即后台预热引擎缓存：不阻塞 install/activate。
+                // 这样即便首个页面尚未被 SW 控制、其引擎请求走了网络，
+                // SW 也会自己把引擎下载进 ENGINE_CACHE，下次刷新即命中秒开。
+                warmUpEngineCache().catch(function(e) {
+                    // 预热失败静默：下次加载走 serve() 正常下载即可。
+                    if (self.console && console.warn) {
+                        console.warn("[xiangqi-sw] engine warm-up failed:", e);
+                    }
+                });
+            });
         }).then(function() {
             return self.skipWaiting();
         })
     );
 });
+
+// 后台预热引擎缓存：把尚未缓存（或未验证完整）的引擎文件下载并写入
+// ENGINE_CACHE，全程完整接收 + 记录内容哈希，刷新/关页中断则不落缓存。
+async function warmUpEngineCache() {
+    const cache = await caches.open(ENGINE_CACHE);
+    for (const path of ENGINE_FILES) {
+        const url = new URL(path, location.origin).href;
+        const req = new Request(url);
+        try {
+            const existing = await cache.match(req);
+            if (existing) {
+                const rec = await getMetaRecord(new URL(url).pathname);
+                if (rec && rec.verified === true && rec.len > 0) {
+                    continue; // 已有完整缓存，无需预热。
+                }
+            }
+            const res = await fetch(req, { cache: "reload" });
+            if (res.ok && res.type === "basic") {
+                const bytes = await readAllBytes(res.body);
+                await cache.put(req, new Response(bytes, { headers: res.headers }));
+                const hash = await sha256Hex(bytes);
+                await markVerified(new URL(url).pathname, bytes.byteLength || bytes.length, hash);
+            }
+        } catch (e) {
+            // 单个文件预热失败不阻塞其它文件。
+        }
+    }
+}
 
 // 激活：先把旧版本缓存里的引擎文件搬运到持久缓存，再清理旧缓存并接管页面。
 self.addEventListener("activate", function(event) {
