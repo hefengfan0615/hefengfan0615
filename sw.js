@@ -33,7 +33,7 @@ const APP_SHELL = [
     "/assets/index.65062099.css"
 ];
 
-// 引擎文件（大体积，.data 约 50MB）：安装时与外壳一起预缓存，构成完整离线快照。
+// 引擎文件（大体积，.data 约 50MB）：不在 install 预缓存，改为运行时按需流式下载并完整落缓存。
 const ENGINE_FILES = [
     "/wasm/pikafish.js",
     "/wasm/pikafish.wasm",
