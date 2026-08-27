@@ -10,9 +10,11 @@
   "/assets/vschess.function.e5de4338.js": "ab64242006bd2a4b9180d56c1ac82069f69bb814e51b0c9315f051e3d5e03e37",
   "/assets/workbox-window.js": "214f4f7a483c9e22dc749fe43ef06d9bc745fb27ecac3c089f99771dd033bad9",
   "/assets/xqf.2e5d5959.js": "45b0480e7fe06dbe654e055d843a20d97dce22ee603d43ff74fc582d0fc92d92",
-  "/sw.js": "816cfdd7e80169065b0d0d20f017659e1e22cff2d6017ef1f67c185c7d488b0a",
+  "/icon-512.jpg": "1bb795fa54e5160a6692ca5727686bf91f55f3753303f4249e4b760d704b1594",
+  "/manifest.json": "c50811b458fe24f805a15311ff3ca366ccd88e295b2762d1b3c370b9cc9a06ba",
+  "/sw.js": "fb85f8b9e9be123a2a73d12eea50f87fa0b35ec05aed881ed20de53ec3eca38d",
   "/wasm/pikafish.data": "3cd15292bf8c979884262f57fc723959fc0dea43b4d8d544f88db5ceb2479e24",
   "/wasm/pikafish.js": "afa3b9941ef12a121686fa089df546660414c6313eee4d3e7915a61625f88632",
-  "/wasm/pikafish.wasm": "fc87874c4942485ab52e100337a380c98411c5b1a7638777aaed0e68b4677a1d",
-  "/xiangqiai.html": "cd8e8e09343e23bbc8abc8afe352575e91dcfbd97ab1d149568a79fabedf58a7"
+  "/wasm/pikafish.wasm": "8936bd8352bf126b699e0a98fcea5f2773eeeae527fd816b9b2acb180fd37624",
+  "/xiangqiai.html": "aa0b1ed16a8ab9e7f63cb56612fb2e879f5724fff7fd4b682cec4fff3faad076"
 }

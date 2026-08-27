@@ -6,23 +6,51 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
     <title>丰帆象棋</title>
+    <link rel="manifest" href="/manifest.json">
+    <meta name="theme-color" content="#b03a2e">
     <script>
         // 请求持久化存储：避免浏览器因站点配额/存储压力把 ~50MB 的引擎缓存
         // (CacheStorage) 按 LRU 回收，从而防止"隔一天不访问就要重新下载引擎文件"。
-        // 持久化原点在 Chrome 等浏览器中会被豁免于自动驱逐。
+        // 关键事实：navigator.storage.persist() 对"非已安装 PWA"往往返回 false，
+        // Chrome 只在用户手势或站点高活跃时授予持久化；因此这里在首次用户交互
+        // (点击/键盘/触摸) 时再次请求，并把持久化结果输出到控制台便于核实。
         (function () {
-            if (navigator.storage && typeof navigator.storage.persist === 'function') {
-                navigator.storage.persist().catch(function () { /* 无权限时静默 */ });
-                if (typeof navigator.storage.estimate === 'function') {
-                    navigator.storage.estimate().then(function (est) {
-                        if (window.console && console.log) {
-                            console.log('[xiangqi-storage] usage=' + (est.usage || 0) +
-                                ' quota=' + (est.quota || 0) +
-                                ' persisted=' + (est.persisted === undefined ? '(n/a)' : est.persisted));
-                        }
-                    }).catch(function () {});
+            function report(label, persisted, granted) {
+                if (window.console && console.log) {
+                    console.log('[xiangqi-storage] ' + label +
+                        ' persisted=' + persisted +
+                        ' persistGranted=' + (granted === undefined ? 'n/a' : granted));
                 }
             }
+            function tryPersist() {
+                if (!navigator.storage || typeof navigator.storage.persist !== 'function') { return; }
+                navigator.storage.persist().then(function (granted) {
+                    if (typeof navigator.storage.persisted === 'function') {
+                        navigator.storage.persisted().then(function (p) {
+                            report('persist', p, granted);
+                        }).catch(function () { report('persist', 'n/a', granted); });
+                    } else {
+                        report('persist', 'n/a', granted);
+                    }
+                }).catch(function () {});
+            }
+            // 页面加载时先请求一次。
+            tryPersist();
+            // Chrome 在用户手势下更可能授予持久化：首次交互时再请求一次。
+            var once = true;
+            function onGesture() {
+                if (!once) { return; }
+                once = false;
+                tryPersist();
+                window.removeEventListener('click', onGesture);
+                window.removeEventListener('keydown', onGesture);
+                window.removeEventListener('touchstart', onGesture);
+                window.removeEventListener('pointerdown', onGesture);
+            }
+            window.addEventListener('click', onGesture);
+            window.addEventListener('keydown', onGesture);
+            window.addEventListener('touchstart', onGesture);
+            window.addEventListener('pointerdown', onGesture);
         })();
     </script>
     <script>

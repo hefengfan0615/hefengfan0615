@@ -27,7 +27,9 @@ const PRECACHE = [
     "/xiangqiai.html",
     "/assets/index.b58f0dd0.js",
     "/assets/index.65062099.css",
-    "/version.json"
+    "/version.json",
+    "/manifest.json",
+    "/icon-512.jpg"
 ];
 
 // 引擎文件：体积大（.data 约 50MB），持久缓存；同样按文件校验更新。
@@ -39,6 +41,20 @@ const ENGINE_FILES = [
 
 function isEngineRequest(url) {
     return ENGINE_FILES.indexOf(url.pathname) !== -1;
+}
+
+// 诊断：把"引擎文件为何重新下载"的具体原因输出到控制台，
+// 便于定位"隔天又要重下"到底是浏览器回收缓存、内容哈希变化、还是旧缓存未验证。
+const DEBUG_ENGINE = true;
+function dlog(reason, path) {
+    if (!DEBUG_ENGINE) {
+        return;
+    }
+    try {
+        (console.warn || console.log)("[xiangqi-engine] " + reason + " " + path);
+    } catch (e) {
+        // 忽略
+    }
 }
 
 // 安装：仅预缓存应用外壳，并立即接管
@@ -84,10 +100,12 @@ async function warmUpEngineCache() {
             }
             const res = await fetch(req, { cache: "reload" });
             if (res.ok && res.type === "basic") {
+                dlog("warm-up: no verified cache, downloading", path);
                 const bytes = await readAllBytes(res.body);
                 await cache.put(req, new Response(bytes, { headers: res.headers }));
                 const hash = await sha256Hex(bytes);
                 await markVerified(new URL(url).pathname, bytes.byteLength || bytes.length, hash);
+                await idbPut(new URL(url).pathname, bytes, hash, res.headers.get("content-type"));
             }
         } catch (e) {
             // 单个文件预热失败不阻塞其它文件。
@@ -144,16 +162,63 @@ async function serve(request) {
 
     if (cached) {
         const rec = await getMetaRecord(url.pathname);
-        if (engine && !(rec && rec.verified === true && rec.len > 0)) {
-            // 引擎缓存存在但无法确认完整（旧版本/半截）-> 丢弃后重新完整下载。
-            try { await cache.delete(request); } catch (e) { /* 忽略 */ }
+        if (engine) {
+            if (!(rec && rec.verified === true && rec.len > 0)) {
+                // 引擎缓存存在但无法确认完整（旧版本/半截）-> 丢弃后重新完整下载。
+                dlog("serve: cache present but UNVERIFIED -> redownload", url.pathname);
+                try { await cache.delete(request); } catch (e) { /* 忽略 */ }
+            } else {
+                // 已确认完整：命中秒开，后台再校验是否确实变化。
+                revalidateFile(request, engine);
+                return withIsolationHeaders(cached);
+            }
         } else {
-            // 命中缓存：先秒开，再后台对该文件做指纹校验，只更新变化的那一个文件。
             revalidateFile(request, engine);
             return withIsolationHeaders(cached);
         }
     }
+    if (engine) {
+        dlog("serve: no cached copy -> try IndexedDB backup", url.pathname);
+        const restored = await restoreFromIndexedDB(request, url.pathname);
+        if (restored) {
+            return withIsolationHeaders(restored);
+        }
+        dlog("serve: no IndexedDB backup -> download from network", url.pathname);
+    }
     return downloadAndStore(request, cache);
+}
+
+// CacheStorage 条目被浏览器按 LRU 回收后，优先从 IndexedDB 冷备恢复并回填
+// CacheStorage，避免重新走网络下载 ~50MB 引擎数据。恢复时同步重新标记 verified。
+async function restoreFromIndexedDB(request, pathname) {
+    const rec = await idbGet(pathname);
+    if (!rec || !rec.bytes || !(rec.bytes.byteLength > 0)) {
+        return null;
+    }
+    try {
+        const body = new Uint8Array(rec.bytes);
+        const resp = new Response(body, {
+            status: 200,
+            statusText: "OK",
+            headers: {
+                "Content-Type": rec.mime || "application/octet-stream",
+                "Content-Length": String(body.byteLength)
+            }
+        });
+        // 回填到 CacheStorage，使后续请求重新命中秒开。
+        const cache = await caches.open(ENGINE_CACHE);
+        try {
+            await cache.put(request, resp.clone());
+        } catch (e) {
+            // 回填失败不影响本次响应。
+        }
+        await markVerified(pathname, body.byteLength, rec.hash || null);
+        dlog("serve: restored from IndexedDB backup", pathname);
+        return resp;
+    } catch (e) {
+        dlog("serve: IndexedDB restore failed", pathname);
+        return null;
+    }
 }
 
 // 下载并缓存一个文件：一边把数据流转发给页面，一边在 SW 内缓冲；
@@ -205,6 +270,8 @@ async function downloadAndStore(request, cache) {
                     }));
                     const fullHash = await sha256Hex(full);
                     await markVerified(url.pathname, received, fullHash);
+                    // 同步写 IndexedDB 冷备：CacheStorage 被回收后可从 IDB 恢复。
+                    await idbPut(url.pathname, full, fullHash, headers.get("content-type"));
                 }
             } catch (e) {
                 if (!aborted) {
@@ -266,6 +333,69 @@ async function markVerified(pathname, len, hash) {
     const meta = await getCacheMeta();
     meta[pathname] = { verified: true, len: len, t: Date.now(), hash: hash || null };
     await saveCacheMeta(meta);
+}
+
+// ---- IndexedDB 冷备 ----
+// 未获得持久化授权时，浏览器会优先回收 CacheStorage 里的大条目（~50MB 的
+// pikafish.data 首当其冲），导致"隔天再访问就要重新下载引擎"。IndexedDB 的
+// 回收优先级低于 CacheStorage，因此把引擎文件另存一份到 IndexedDB 作冷备；
+// CacheStorage 条目被回收后，优先从 IndexedDB 恢复，避免重新走网络下载 50MB。
+const IDB_NAME = "fengfan-xiangqi-engine";
+const IDB_STORE = "files";
+
+function idbOpen() {
+    return new Promise(function(resolve, reject) {
+        let req;
+        try {
+            req = indexedDB.open(IDB_NAME, 1);
+        } catch (e) {
+            reject(e);
+            return;
+        }
+        req.onupgradeneeded = function() {
+            const db = req.result;
+            if (!db.objectStoreNames.contains(IDB_STORE)) {
+                db.createObjectStore(IDB_STORE, { keyPath: "path" });
+            }
+        };
+        req.onsuccess = function() { resolve(req.result); };
+        req.onerror = function() { reject(req.error); };
+    });
+}
+
+async function idbPut(path, bytes, hash, mime) {
+    try {
+        const db = await idbOpen();
+        await new Promise(function(resolve, reject) {
+            const tx = db.transaction(IDB_STORE, "readwrite");
+            tx.objectStore(IDB_STORE).put({
+                path: path, bytes: bytes, hash: hash || null,
+                mime: mime || "application/octet-stream", t: Date.now()
+            });
+            tx.oncomplete = function() { resolve(); };
+            tx.onerror = function() { reject(tx.error); };
+            tx.onabort = function() { reject(tx.error); };
+        });
+        db.close();
+    } catch (e) {
+        // IndexedDB 写入失败不阻塞主流程，下次仍可走网络下载。
+    }
+}
+
+async function idbGet(path) {
+    try {
+        const db = await idbOpen();
+        const rec = await new Promise(function(resolve, reject) {
+            const tx = db.transaction(IDB_STORE, "readonly");
+            const req = tx.objectStore(IDB_STORE).get(path);
+            req.onsuccess = function() { resolve(req.result || null); };
+            req.onerror = function() { reject(req.error); };
+        });
+        db.close();
+        return rec;
+    } catch (e) {
+        return null;
+    }
 }
 
 // ---- 内容哈希（sha256）----
@@ -398,6 +528,7 @@ async function revalidateFile(request, engine) {
             await cache.put(request, new Response(bytes, { headers: fresh.headers }));
             const hash = await sha256Hex(bytes);
             await markVerified(url.pathname, bytes.byteLength || bytes.length, hash);
+            await idbPut(url.pathname, bytes, hash, fresh.headers.get("content-type"));
         }
     } catch (e) {
         // 网络失败：保留现有缓存，静默忽略，下次打开再校验。
