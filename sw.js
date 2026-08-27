@@ -5,9 +5,11 @@
 //      ENGINE_VERSION 由 CI 依据引擎内容哈希生成（见 scripts/sync-engine-version.sh）：
 //        引擎内容不变 -> 版本不变 -> 缓存名不变 -> 用户日常访问永远命中本地缓存，不再"隔天重下";
 //        引擎内容变化 -> 版本变化 -> sw.js 变化 -> 浏览器安装新 SW、激活时删除旧缓存，从而精准失效旧引擎。
-//   2. 安装时一次性预缓存全部资源（应用外壳 + 引擎 pikafish.js/.wasm/.data）。
-//      cache.add 为"全有或全无"，建成即是一个完整、可直接离线运行的快照，
-//      从根上杜绝"半截缓存导致进度卡在 0%"，也无需再依赖易失效的 verified 标记。
+//   2. 安装时仅预缓存应用外壳（小体积）并立即 skipWaiting 激活、接管页面，
+//      促使文档尽快拿到 COOP/COEP 跨源隔离，从而让多线程 WASM 引擎尽早可用。
+//      引擎大文件（pikafish.js/.wasm/.data）改为"按需流式下载 + 完整落缓存"：
+//      不阻塞激活，避免无痕模式下每次全新建仓时安装被 ~50MB 下载卡住、
+//      跨源隔离迟迟不来，导致引擎进度永远停在 0%。
 //   3. 运行时 Cache First + stale-while-revalidate：命中缓存立即返回（秒开），
 //      前端资源后台以 version.json 的内容哈希静默校验，只有内容真正变化的文件才单独重下。
 //   4. 所有响应统一注入 COOP/COEP 隔离头，保证多线程 WASM 引擎（SharedArrayBuffer）可用。
@@ -42,7 +44,10 @@ function isEngineRequest(url) {
     return ENGINE_FILES.indexOf(url.pathname) !== -1;
 }
 
-// ---------- 安装：预缓存外壳 + 引擎全套资源 ----------
+// ---------- 安装：仅预缓存外壳，快速激活与接管 ----------
+// 引擎大文件不在此预缓存：安装 waitUntil 若等待 ~50MB 的 .data 下载，
+// 会卡住激活 -> 文档迟迟拿不到 COOP/COEP -> 跨源隔离不来 -> 引擎卡在 0%。
+// 引擎改为运行时按需流式下载（见 serve/downloadAndStore），边下边缓存、进度可感知。
 self.addEventListener("install", function (event) {
     event.waitUntil(
         (async function () {
@@ -50,10 +55,6 @@ self.addEventListener("install", function (event) {
             // 外壳：任一失败不阻塞激活与接管。
             await Promise.allSettled(
                 APP_SHELL.map(function (url) { return cache.add(url); })
-            );
-            // 引擎：一并预缓存 ~50MB 的 .data（全有或全无，不会留下半截缓存）。
-            await Promise.allSettled(
-                ENGINE_FILES.map(function (url) { return cache.add(url); })
             );
             return self.skipWaiting();
         })()
