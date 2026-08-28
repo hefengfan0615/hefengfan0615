@@ -26,8 +26,6 @@ const CACHE_NAME = "fengfan-xiangqi-" + ENGINE_VERSION;
 // 其余资源由运行时 on-demand 缓存 + 内容哈希校验接管。
 const APP_SHELL = [
     "/xiangqiai.html",
-    "/manifest.json",
-    "/icon-512.jpg",
     "/version.json",
     "/assets/index.b58f0dd0.js",
     "/assets/index.65062099.css"

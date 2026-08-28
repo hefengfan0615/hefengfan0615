@@ -93,8 +93,6 @@ jobs:
               "wasm/pikafish.wasm",
               "wasm/pikafish.data",
               "xiangqiai.html",
-              "manifest.json",
-              "icon-512.jpg",
               "sw.js",
           ]
           worker = "wasm/pikafish.worker.js"

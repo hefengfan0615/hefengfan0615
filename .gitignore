@@ -19,3 +19,6 @@ tsan.supp
 __pycache__/
 tests/syzygy
 tests/bench_tmp.epd
+
+# TraeCode preview artifacts
+.trae-html-share-packages
