@@ -112,63 +112,19 @@ async function serve(request) {
     return downloadAndStore(request, cache);
 }
 
-// ---------- 下载并缓存（完整接收后才落缓存）----------
+// ---------- 下载并缓存（克隆一份落缓存，原样流式返回给页面）----------
 async function downloadAndStore(request, cache) {
-    const url = new URL(request.url);
-    // cache:"reload" 绕过浏览器 HTTP/磁盘缓存，直接回源取得完整文件，避免读到半截坏缓存。
+    // cache:"reload" 绕过浏览器 HTTP/磁盘缓存，直接回源取得最新文件。
     const response = await fetch(request, { cache: "reload" });
     if (!isValidResponse(response)) {
         return withIsolationHeaders(response);
     }
-    const headers = new Headers(response.headers);
-    const contentLength = parseFloat(response.headers.get("content-length")) || 0;
-    const chunks = [];
-    let received = 0;
-    let aborted = false;
-    const reader = response.body.getReader();
-
-    const forwarded = new Response(new ReadableStream({
-        async start(controller) {
-            try {
-                for (;;) {
-                    const chunk = await reader.read();
-                    if (chunk.done) break;
-                    received += chunk.value.byteLength;
-                    chunks.push(chunk.value);
-                    controller.enqueue(chunk.value);
-                }
-                controller.close();
-                // 完整接收且未被中断 -> 才落缓存，杜绝半截缓存。
-                if (!aborted && (contentLength === 0 || received === contentLength)) {
-                    const full = new Uint8Array(received);
-                    let offset = 0;
-                    chunks.forEach(function (c) { full.set(c, offset); offset += c.byteLength; });
-                    await cache.put(request, new Response(full, {
-                        status: response.status,
-                        statusText: response.statusText,
-                        headers: headers
-                    }));
-                }
-            } catch (e) {
-                if (!aborted) {
-                    try { controller.error(e); } catch (_) { /* 忽略 */ }
-                }
-                // 中断/出错：不提交任何缓存，下次刷新重新完整下载。
-            }
-        },
-        cancel: function () {
-            aborted = true;
-            if (reader && typeof reader.cancel === "function") {
-                reader.cancel().catch(function () { /* 忽略取消错误 */ });
-            }
-        }
-    }), {
-        status: response.status,
-        statusText: response.statusText,
-        headers: headers
-    });
-
-    return withIsolationHeaders(forwarded);
+    // 后台写缓存（克隆一份，原响应原样返回给页面）：Cache API 会完整读取 clone 后才落盘，
+    // 读不完（中断/网络错）则不写入 —— 天然杜绝"半截缓存"。
+    // 相比手写流式拼接 + content-length 校验更健壮：手写方案在 gzip/chunked/无
+    // content-length 等情况下会误判"未收齐"而永不落缓存 -> 每次刷新都回源重下、离线读不到。
+    cache.put(request, response.clone()).catch(function () { /* 忽略，下次访问重试 */ });
+    return withIsolationHeaders(response);
 }
 
 // ---------- 前端资源后台校验（stale-while-revalidate）----------
