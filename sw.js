@@ -212,9 +212,13 @@ async function kickoffRevalidate(url, cache) {
 
 // ============================================================================
 // 飞行下载（LiveDownload）：负责一次引擎文件的"流式 + 续传"下载。
-//   - 后台拉取网络流，边读边把字节块追加到内存缓冲；
-//   - 任意数量的页面消费者通过 stream() 回放"已缓冲字节 + 实时字节"；
-//   - 下载完成后把整份数据写回 CacheStorage（data 额外记录 meta sha256）。
+//   - 用 tee() 把网络响应分成两路：
+//       [a] 直接交给首个页面消费者 —— 这是网络原生流，浏览器会逐步转发，
+//           保证 Emscripten 能拿到真实 "Downloading data... (x/y)" 进度
+//           （修复"首次加载一直 0%"）。
+//       [b] 我们自己读取并缓冲进内存，供刷新后的续传，下载完成写回缓存。
+//   - 刷新后再次请求（下载未完）时，从缓冲回放"已下载字节 + 实时字节"，
+//     不重新下载。
 //   注意：缓冲整份文件（.data 约 50MB）是换取"刷新续传"的代价，下载完即释放。
 // ============================================================================
 const inflight = new Map(); // pathname -> LiveDownload
@@ -223,12 +227,14 @@ class LiveDownload {
     constructor(url) {
         this.url = url;
         this.path = url.pathname;
-        this.chunks = [];
+        this.chunks = [];       // 缓冲：供续传回放 + 完成后写回缓存
         this.received = 0;
         this.total = 0;
         this.headers = null;
         this.status = 0;
         this.statusText = "";
+        this.pageStream = null;    // 网络原始 tee 分支 [a]：给首个消费者
+        this.pageStreamTaken = false;
         this.done = false;
         this.failed = false;
         this.waiters = new Set();    // 等待新数据块的 pull 续期器
@@ -245,9 +251,13 @@ class LiveDownload {
             this.headers = resp.headers;
             if (!resp.ok || resp.type !== "basic") throw new Error("HTTP " + resp.status);
             this.total = Number(resp.headers.get("Content-Length") || 0);
+
+            // tee：a 给页面（原生流式，进度可见）；b 供我们缓冲 + 写缓存
+            const branches = resp.body.tee();
+            this.pageStream = branches[0];
             this._resolveHeaderWaiters();
 
-            const reader = resp.body.getReader();
+            const reader = branches[1].getReader();
             for (;;) {
                 const r = await reader.read();
                 if (r.done) break;
@@ -308,25 +318,46 @@ class LiveDownload {
         } catch (e) { /* 缓存失败不影响本次流式返回 */ }
     }
 
-    // 构造给页面的响应：等待响应头（拿真实状态），然后流式返回。
-    // 失败时 reject，让页面侧 fetch 抛错从而走重试/离线提示。
+    // 构造给页面的响应：
+    //   首个消费者 → 直接使用网络原生流 [a]（进度必达）。
+    //   后续消费者（刷新续传）→ 回放已缓冲字节 + 实时字节。
+    //   失败时 reject，让页面侧 fetch 抛错从而走重试/离线提示。
     respond() {
         const self = this;
+        if (!this.pageStreamTaken && this.pageStream) {
+            this.pageStreamTaken = true;
+            return Promise.resolve(this._buildNetworkResponse());
+        }
         if (this.done) {
             if (this.failed) return Promise.reject(new Error("engine download failed"));
-            return Promise.resolve(this._build());
+            return Promise.resolve(this._buildReplayResponse());
         }
+        // 响应头还没到：等拿到网络流后再决定
         return new Promise(function (resolve, reject) {
             self.headerWaiters.push({
-                resolve: function () { resolve(self._build()); },
+                resolve: function () { resolve(self.respond()); },
                 reject: reject
             });
         });
     }
 
-    // 返回一个 Response：body 回放已缓冲字节 + 实时续传字节。
+    // 网络原生流响应：浏览器逐步转发到页面，进度可见。
     // 不设 Content-Length，Emscripten 会回退到 packageSize 计算进度，避免压缩偏差。
-    _build() {
+    _buildNetworkResponse() {
+        const headers = new Headers(this.headers || {});
+        headers.delete("Content-Encoding"); // 已解压，避免客户端二次解码
+        headers.delete("Content-Length");
+        headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+        headers.set("Cross-Origin-Opener-Policy", "same-origin");
+        return new Response(this.pageStream, {
+            status: this.status || 200,
+            statusText: this.statusText || "OK",
+            headers: headers
+        });
+    }
+
+    // 续传响应：回放已缓冲字节 + 实时字节（仅刷新后下载未完时使用）。
+    _buildReplayResponse() {
         const self = this;
         let pos = 0;
         const stream = new ReadableStream({
@@ -356,7 +387,7 @@ class LiveDownload {
         });
 
         const headers = new Headers(self.headers || {});
-        headers.delete("Content-Encoding"); // 已解压，避免客户端二次解码
+        headers.delete("Content-Encoding");
         headers.delete("Content-Length");
         headers.set("Cross-Origin-Embedder-Policy", "require-corp");
         headers.set("Cross-Origin-Opener-Policy", "same-origin");
