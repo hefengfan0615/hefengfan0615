@@ -1,49 +1,51 @@
 // ============================================================================
 // Fengfan Xiangqi Service Worker
 //
-// 缓存策略：内容哈希精确同步（以 version.json 的 sha256 为唯一真值源）
+// 缓存策略：引擎 / 前端界面 分层缓存 + Cache First + stale-while-revalidate
 //
-//   "哪个文件变了"只由 version.json 里的 sha256 决定，不依赖服务器的 ETag：
-//   1. 每次加载某个文件时，先取最新 version.json，比对该文件的 sha256：
-//        - 一致       -> 直接用缓存（未变：不重新下载，且缓存内容即最新）；
-//        - 不一致/无缓存 -> 回源下载这一个文件并覆盖缓存，返回最新。
-//      因此"改了哪个文件，就只更新哪个文件的缓存，其余全部沿用"。
-//   2. 大文件 pikafish.data（~50MB）：下载时算一次 sha256 并缓存到 meta 条目，
-//      之后每次只做"version.json 哈希 vs 已存哈希"的字符串比对（秒级，不读 50MB），
-//      未变不重下；只有哈希真的变了才回源重下并重算哈希。
-//   3. 离线：version.json / 回源失败时回退缓存，离线仍能打开。
-//   4. 所有响应统一注入 COOP/COEP，保证多线程 WASM（SharedArrayBuffer）可用，
-//      避免无痕模式下引擎卡在 0%。
+//   命中缓存立即返回（快、不阻塞首屏），同时后台回源校验，并用 version.json
+//   的 sha256 作为唯一真值源做精确比对（不依赖不可靠的服务器 ETag）：
+//     —— 哪个文件 hash 变了，就只下载替换那一个文件，其余沿用缓存；
+//     —— 未变则完全不动，保持最新且不多下。
+//   引擎大文件 pikafish.data（~50MB）：下载时算一次 sha256 存 meta，
+//   之后只做字符串比对（秒级，不读 50MB），未变不重下。
+//
+//   所有响应统一注入 COOP/COEP，保证多线程 WASM（SharedArrayBuffer）可用，
+//   避免无痕模式引擎卡在 0%。
 // ============================================================================
 
 "use strict";
 
-// 缓存结构版本：仅当缓存读写结构变化时手动递增（v1 -> v2 ...）。
-// 本次仅新增 data 的 meta 哈希条目，内容/读写结构兼容，保持 v1，避免清空旧缓存重下。
 const CACHE_NAME = "fengfan-xiangqi-files-v1";
 const MANIFEST_PATH = "/version.json";
 const DATA_PATH = "/wasm/pikafish.data";
 const DATA_META_KEY = "/__meta/pikafish.data.sha256"; // 仅内部记录 data 的 sha256，非真实文件
 
-// 应用外壳（小体积）：离线首屏所需的最小集合。
-// 引擎大文件（pikafish.js/.wasm/.data）按需下载 + 缓存，不阻塞激活。
+// 前端界面外壳：小体积，安装时预缓存，保证离线首屏
 const APP_SHELL = [
     "/xiangqiai.html",
     "/assets/index.b58f0dd0.js",
     "/assets/index.65062099.css"
 ];
 
+// 引擎文件判断（本项目为 pikafish.js / .wasm / .data）
+function isEngineFile(urlPath) {
+    return urlPath.indexOf("/wasm/pikafish.js") >= 0 ||
+           urlPath.indexOf("/wasm/pikafish.wasm") >= 0 ||
+           urlPath.indexOf("/wasm/pikafish.data") >= 0;
+}
+
 // ----------------------------------------------------------------------------
-// 安装：仅预缓存外壳并立即 skipWaiting，尽快接管页面。
+// 安装：预缓存前端外壳并立即 skipWaiting，尽快接管页面。
 // ----------------------------------------------------------------------------
 self.addEventListener("install", function (event) {
     event.waitUntil(
         (async function () {
             const cache = await caches.open(CACHE_NAME);
             await Promise.allSettled(
-                APP_SHELL.map(function (url) { return cache.add(url); })
+                APP_SHELL.map(function (u) { return cache.add(u); })
             );
-            return self.skipWaiting();
+            await self.skipWaiting();
         })()
     );
 });
@@ -60,11 +62,18 @@ self.addEventListener("activate", function (event) {
                     .map(function (k) { return caches.delete(k); })
             );
             await self.clients.claim();
-        })().catch(function () {
-            // 清理/接管失败不影响后续 fetch。
-        })
+        })().catch(function () { /* 清理/接管失败不影响后续 fetch */ })
     );
 });
+
+// ----------------------------------------------------------------------------
+// 通知所有打开页面：缓存内容有更新，可提示刷新/重启。
+// ----------------------------------------------------------------------------
+function notifyUpdate() {
+    self.clients.matchAll({ type: "window" }).then(function (list) {
+        list.forEach(function (c) { c.postMessage({ type: "CACHE_UPDATED" }); });
+    });
+}
 
 // ----------------------------------------------------------------------------
 // 抓取：仅拦截同源 GET 请求。
@@ -75,82 +84,104 @@ self.addEventListener("fetch", function (event) {
     const url = new URL(req.url);
     if (url.origin !== self.location.origin) return;
 
-    event.respondWith(serve(req));
+    event.respondWith(serve(req, url));
 });
 
 // ----------------------------------------------------------------------------
-// 核心分流：清单/大文件各自特殊处理，其余按小文件精确比对。
+// 核心分流：清单 / 导航走网络优先；引擎文件与前端资源走 Cache First + SWR。
 // ----------------------------------------------------------------------------
-async function serve(request) {
+async function serve(req, url) {
     const cache = await caches.open(CACHE_NAME);
-    const url = new URL(request.url);
 
-    // 导航请求（HTML 文档）走快速通道：直接 Network-First 并注入 COOP/COEP，
-    // 不等待 version.json 拉取和 sha256 计算。无痕模式首屏时引擎卡 0% 的根因
-    // 正是多线程 WASM 需要的 SharedArrayBuffer 拿不到（页面未跨源隔离），而隔离头
-    // 只能由 SW 在导航响应里注入；若导航被哈希比对拖慢/拖垮，隔离就迟迟不生效。
-    if (request.mode === "navigate") return networkFirst(request, cache);
+    // version.json 自身：必须拿到最新清单。
+    if (url.pathname === MANIFEST_PATH) return networkFirst(req, cache);
 
-    if (url.pathname === MANIFEST_PATH) return networkFirst(request, cache);
-    if (url.pathname === DATA_PATH) return serveData(request, cache);
-    return serveSmall(request, url, cache);
+    // 导航请求（HTML 文档）：网络优先，保证界面每次都是最新，并第一时间注入
+    // COOP/COEP 建立跨源隔离（无痕模式卡 0% 的修复就靠这条快速通道）。
+    if (req.mode === "navigate") return networkFirst(req, cache);
+
+    // 引擎文件：Cache First + SWR。
+    if (isEngineFile(url.pathname)) {
+        // 大文件 data 单独走 meta 哈希逻辑，避免每次读 50MB 计算。
+        if (url.pathname === DATA_PATH) return cacheFirstData(req, cache);
+        return cacheFirstSWR(req, url, cache);
+    }
+
+    // 前端界面资源：Cache First + SWR。
+    return cacheFirstSWR(req, url, cache);
 }
 
 // ----------------------------------------------------------------------------
-// 小文件（assets/js/css/html/wasm 等）：
-//   用 version.json 的 sha256 精确比对；一致直接用缓存，不一致才回源重下。
+// 小文件（前端 assets / 引擎 js·wasm）：Cache First + stale-while-revalidate。
+//   命中缓存立即返回；后台用 version.json 的 sha256 校验，变了才回源更新缓存。
 // ----------------------------------------------------------------------------
-async function serveSmall(request, url, cache) {
-    const cached = await cache.match(request);
-    const manifest = await getManifest(cache);
-    const expected = manifest ? manifest[url.pathname] : undefined;
+async function cacheFirstSWR(req, url, cache) {
+    const cached = await cache.match(req);
 
-    if (expected && cached) {
-        const hash = await sha256Hex(await readAllBytes(cached.clone().body));
-        if (hash === expected) {
-            return withIsolationHeaders(cached); // 缓存内容即最新，直接用
-        }
+    // 后台校验并更新（不阻塞本次响应）
+    const refreshing = (async function () {
+        try {
+            const manifest = await getManifest(cache);
+            const expected = manifest ? manifest[url.pathname] : undefined;
+            if (expected && cached) {
+                const hash = await sha256Hex(await readAllBytes(cached.clone().body));
+                if (hash === expected) return; // 缓存内容即最新，无需更新
+            }
+            const fresh = await fetch(req, { cache: "reload" });
+            if (fresh && fresh.ok && fresh.type === "basic") {
+                await cache.put(req, fresh.clone()).catch(function () {});
+                if (cached) notifyUpdate();
+            }
+        } catch (e) { /* 忽略，回退缓存即可 */ }
+    })();
+
+    if (cached) {
+        return withIsolationHeaders(cached); // 立即返回缓存（stale）
     }
 
-    return networkFirst(request, cache); // 变更或首次：回源拿最新
+    // 无缓存：等待后台回源完成再返回
+    await refreshing;
+    const freshCached = await cache.match(req);
+    if (freshCached) return withIsolationHeaders(freshCached);
+    return new Response(null, { status: 504, statusText: "Network Unavailable" });
 }
 
 // ----------------------------------------------------------------------------
-// 大文件 data：用 meta 里缓存的 sha256 与 version.json 比对（不读 50MB）；
-//   匹配直接用缓存，不匹配才回源下载并重算哈希。
+// 引擎大文件 pikafish.data：Cache First + SWR + meta 哈希。
+//   命中缓存立即返回；后台比对 version.json 哈希与已存 meta 哈希（字符串比对），
+//   一致不动，不一致才回源下载并重算 sha256 更新 meta。
 // ----------------------------------------------------------------------------
-async function serveData(request, cache) {
-    const manifest = await getManifest(cache);
-    const expected = manifest ? manifest[DATA_PATH] : undefined;
+async function cacheFirstData(req, cache) {
+    const cached = await cache.match(DATA_PATH);
 
-    if (expected) {
-        const stored = await readStoredSha(cache);
-        if (stored === expected) {
-            const cached = await cache.match(DATA_PATH);
-            if (cached) return withIsolationHeaders(cached);
-        }
+    const refreshing = (async function () {
+        try {
+            const manifest = await getManifest(cache);
+            const expected = manifest ? manifest[DATA_PATH] : undefined;
+            if (expected) {
+                const stored = await readStoredSha(cache);
+                if (stored === expected) return; // 已最新
+            }
+            const fresh = await fetch(DATA_PATH, { cache: "reload" });
+            if (fresh && fresh.ok && fresh.type === "basic") {
+                const bytes = await readAllBytes(fresh.clone().body);
+                const sha = await sha256Hex(bytes);
+                await cache.put(DATA_PATH, fresh.clone()).catch(function () {});
+                await cache.put(DATA_META_KEY, new Response(sha, { headers: { "Content-Type": "text/plain" } }))
+                    .catch(function () {});
+                if (cached) notifyUpdate();
+            }
+        } catch (e) { /* 忽略 */ }
+    })();
+
+    if (cached) {
+        return withIsolationHeaders(cached);
     }
 
-    // 需要回源：下载最新，算一次 sha256，写缓存 + 写 meta。
-    try {
-        const fresh = await fetch(DATA_PATH, { cache: "reload" });
-        if (!(fresh.ok && fresh.type === "basic")) {
-            const cached = await cache.match(DATA_PATH);
-            if (cached) return withIsolationHeaders(cached);
-            return withIsolationHeaders(fresh);
-        }
-
-        const bytes = await readAllBytes(fresh.clone().body);
-        const sha = await sha256Hex(bytes);
-        cache.put(DATA_PATH, fresh.clone()).catch(function () { /* 忽略，下次再写 */ });
-        cache.put(DATA_META_KEY, new Response(sha, { headers: { "Content-Type": "text/plain" } }))
-            .catch(function () { /* 忽略 */ });
-        return withIsolationHeaders(fresh);
-    } catch (e) {
-        const cached = await cache.match(DATA_PATH);
-        if (cached) return withIsolationHeaders(cached);
-        return new Response(null, { status: 504, statusText: "Network Unavailable" });
-    }
+    await refreshing;
+    const freshCached = await cache.match(DATA_PATH);
+    if (freshCached) return withIsolationHeaders(freshCached);
+    return new Response(null, { status: 504, statusText: "Network Unavailable" });
 }
 
 async function readStoredSha(cache) {
@@ -162,21 +193,20 @@ async function readStoredSha(cache) {
 }
 
 // ----------------------------------------------------------------------------
-// 网络优先（用于 version.json 自身、无哈希文件、以及已确认要回源的文件）：
-//   成功 -> 写缓存并返回；失败/异常 -> 回退缓存或 504。
+// 网络优先（用于 version.json 与导航文档）：成功写缓存返回，失败回退缓存。
 // ----------------------------------------------------------------------------
-async function networkFirst(request, cache) {
+async function networkFirst(req, cache) {
     try {
-        const fresh = await fetch(request, { cache: "reload" });
-        if (fresh.ok && fresh.type === "basic") {
-            cache.put(request, fresh.clone()).catch(function () { /* 忽略 */ });
+        const fresh = await fetch(req, { cache: "reload" });
+        if (fresh && fresh.ok && fresh.type === "basic") {
+            await cache.put(req, fresh.clone()).catch(function () {});
             return withIsolationHeaders(fresh);
         }
-        const cached = await cache.match(request);
+        const cached = await cache.match(req);
         if (cached) return withIsolationHeaders(cached);
         return withIsolationHeaders(fresh);
     } catch (e) {
-        const cached = await cache.match(request);
+        const cached = await cache.match(req);
         if (cached) return withIsolationHeaders(cached);
         return new Response(null, { status: 504, statusText: "Network Unavailable" });
     }
@@ -199,16 +229,14 @@ function getManifest(cache) {
 async function loadManifest(cache) {
     try {
         const fresh = await fetch(MANIFEST_PATH, { cache: "reload" });
-        if (fresh.ok && fresh.type === "basic") {
+        if (fresh && fresh.ok && fresh.type === "basic") {
             const data = await fresh.json().catch(function () { return null; });
             if (data) {
-                await cache.put(MANIFEST_PATH, fresh.clone()).catch(function () { /* 忽略 */ });
+                await cache.put(MANIFEST_PATH, fresh.clone()).catch(function () {});
                 return data;
             }
         }
-    } catch (e) {
-        // 回源失败：用缓存清单。
-    }
+    } catch (e) { /* 回源失败：用缓存清单 */ }
     try {
         const r = await cache.match(MANIFEST_PATH);
         if (r) return (await r.json().catch(function () { return null; })) || null;
@@ -220,6 +248,7 @@ async function loadManifest(cache) {
 // 工具函数。
 // ----------------------------------------------------------------------------
 async function readAllBytes(body) {
+    if (!body) return new Uint8Array(0);
     const reader = body.getReader();
     const chunks = [];
     let size = 0;
@@ -263,3 +292,21 @@ function withIsolationHeaders(response) {
         return response;
     }
 }
+
+// ----------------------------------------------------------------------------
+// 来自页面的指令：跳过等待 / 清空缓存。
+// ----------------------------------------------------------------------------
+self.addEventListener("message", function (event) {
+    const d = event.data || {};
+    if (d.type === "SKIP_WAITING") {
+        self.skipWaiting();
+    } else if (d.type === "CLEAR_CACHE") {
+        event.waitUntil(
+            caches.delete(CACHE_NAME)
+                .then(function () { return self.clients.matchAll(); })
+                .then(function (list) {
+                    list.forEach(function (c) { c.postMessage({ type: "CACHE_CLEARED" }); });
+                })
+        );
+    }
+});
