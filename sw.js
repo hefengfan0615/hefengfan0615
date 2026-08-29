@@ -3,15 +3,18 @@
 //
 // 缓存策略：引擎 / 前端界面 分层缓存 + Cache First + stale-while-revalidate
 //
-//   命中缓存立即返回（快、不阻塞首屏），同时后台回源校验，并用 version.json
-//   的 sha256 作为唯一真值源做精确比对（不依赖不可靠的服务器 ETag）：
-//     —— 哪个文件 hash 变了，就只下载替换那一个文件，其余沿用缓存；
-//     —— 未变则完全不动，保持最新且不多下。
-//   引擎大文件 pikafish.data（~50MB）：下载时算一次 sha256 存 meta，
-//   之后只做字符串比对（秒级，不读 50MB），未变不重下。
-//
-//   所有响应统一注入 COOP/COEP，保证多线程 WASM（SharedArrayBuffer）可用，
-//   避免无痕模式引擎卡在 0%。
+//  [1] 前端界面资源：Cache First + SWR。
+//  [2] 引擎文件（pikafish.js / .wasm / .data）：Cache First + SWR，
+//      命中缓存立即返回；未命中时把网络响应【直接流式转发】给页面，
+//      让 Emscripten 的 setStatus("Downloading data... (x/y)") 能拿到真实
+//      进度（修复"引擎加载一直 0%"）。
+//  [3] 续传：飞行下载（LiveDownload）缓存在 SW 内存里，并在页面关闭后继续
+//      下载写回 CacheStorage；引擎加载中刷新页面会【接着上次已下载的字节
+//      继续】，而不是从头重新下载。
+//  [4] 真值源 = version.json 的 sha256（不依赖不可靠的服务器 ETag）：
+//      哪个文件 hash 变了，就只回源替换那一个，其余沿用，保持最新且不多下。
+//      大文件 pikafish.data（~50MB）用 meta 哈希做秒级字符串比对，不重复读盘。
+//  [5] 所有响应统一注入 COOP/COEP，保证多线程 WASM（SharedArrayBuffer）可用。
 // ============================================================================
 
 "use strict";
@@ -67,7 +70,7 @@ self.addEventListener("activate", function (event) {
 });
 
 // ----------------------------------------------------------------------------
-// 通知所有打开页面：缓存内容有更新，可提示刷新/重启。
+// 通知所有打开页面：缓存内容有更新（页面侧无监听，纯提示）。
 // ----------------------------------------------------------------------------
 function notifyUpdate() {
     self.clients.matchAll({ type: "window" }).then(function (list) {
@@ -84,13 +87,13 @@ self.addEventListener("fetch", function (event) {
     const url = new URL(req.url);
     if (url.origin !== self.location.origin) return;
 
-    event.respondWith(serve(req, url));
+    event.respondWith(serve(event, req, url));
 });
 
 // ----------------------------------------------------------------------------
-// 核心分流：清单 / 导航走网络优先；引擎文件与前端资源走 Cache First + SWR。
+// 核心分流：清单 / 导航走网络优先；引擎文件走流式 + 续传；前端资源走 SWR。
 // ----------------------------------------------------------------------------
-async function serve(req, url) {
+async function serve(event, req, url) {
     const cache = await caches.open(CACHE_NAME);
 
     // version.json 自身：必须拿到最新清单。
@@ -100,25 +103,20 @@ async function serve(req, url) {
     // COOP/COEP 建立跨源隔离（无痕模式卡 0% 的修复就靠这条快速通道）。
     if (req.mode === "navigate") return networkFirst(req, cache);
 
-    // 引擎文件：Cache First + SWR。
-    if (isEngineFile(url.pathname)) {
-        // 大文件 data 单独走 meta 哈希逻辑，避免每次读 50MB 计算。
-        if (url.pathname === DATA_PATH) return cacheFirstData(req, cache);
-        return cacheFirstSWR(req, url, cache);
-    }
+    // 引擎文件：Cache First + 流式下载 + 续传。
+    if (isEngineFile(url.pathname)) return cacheFirstEngine(event, req, url, cache);
 
     // 前端界面资源：Cache First + SWR。
     return cacheFirstSWR(req, url, cache);
 }
 
 // ----------------------------------------------------------------------------
-// 小文件（前端 assets / 引擎 js·wasm）：Cache First + stale-while-revalidate。
-//   命中缓存立即返回；后台用 version.json 的 sha256 校验，变了才回源更新缓存。
+// 前端界面资源：Cache First + stale-while-revalidate。
+//   命中缓存立即返回；后台用 version.json 的 sha256 校验，变了才回源更新。
 // ----------------------------------------------------------------------------
 async function cacheFirstSWR(req, url, cache) {
     const cached = await cache.match(req);
 
-    // 后台校验并更新（不阻塞本次响应）
     const refreshing = (async function () {
         try {
             const manifest = await getManifest(cache);
@@ -147,49 +145,227 @@ async function cacheFirstSWR(req, url, cache) {
 }
 
 // ----------------------------------------------------------------------------
-// 引擎大文件 pikafish.data：Cache First + SWR + meta 哈希。
-//   命中缓存立即返回；后台比对 version.json 哈希与已存 meta 哈希（字符串比对），
-//   一致不动，不一致才回源下载并重算 sha256 更新 meta。
+// 引擎文件：Cache First + 流式下载 + 续传。
+//   命中缓存 → 立即返回，后台按需校验（小文件 sha256 / data 用 meta）。
+//   未命中   → 加入/创建"飞行下载"，把已缓冲字节 + 实时字节流式返回给页面，
+//              进度可见；后台下载在页面刷新后仍继续并写回 CacheStorage。
 // ----------------------------------------------------------------------------
-async function cacheFirstData(req, cache) {
-    const cached = await cache.match(DATA_PATH);
-
-    const refreshing = (async function () {
-        try {
-            const manifest = await getManifest(cache);
-            const expected = manifest ? manifest[DATA_PATH] : undefined;
-            if (expected) {
-                const stored = await readStoredSha(cache);
-                if (stored === expected) return; // 已最新
-            }
-            const fresh = await fetch(DATA_PATH, { cache: "reload" });
-            if (fresh && fresh.ok && fresh.type === "basic") {
-                const bytes = await readAllBytes(fresh.clone().body);
-                const sha = await sha256Hex(bytes);
-                await cache.put(DATA_PATH, fresh.clone()).catch(function () {});
-                await cache.put(DATA_META_KEY, new Response(sha, { headers: { "Content-Type": "text/plain" } }))
-                    .catch(function () {});
-                if (cached) notifyUpdate();
-            }
-        } catch (e) { /* 忽略 */ }
-    })();
-
+async function cacheFirstEngine(event, req, url, cache) {
+    const cached = await cache.match(req);
     if (cached) {
+        // 后台按需重新校验，不阻塞本次响应
+        kickoffRevalidate(url, cache).catch(function () {});
         return withIsolationHeaders(cached);
     }
 
-    await refreshing;
-    const freshCached = await cache.match(DATA_PATH);
-    if (freshCached) return withIsolationHeaders(freshCached);
-    return new Response(null, { status: 504, statusText: "Network Unavailable" });
+    // 无缓存：若正在下载则续传，否则启动新的飞行下载。
+    let live = inflight.get(url.pathname);
+    if (live && live.done) {
+        const now = await cache.match(req);
+        if (now) return withIsolationHeaders(now);
+        live = null; // 已完成但未入缓存（失败）：重新下载
+    }
+    if (!live) {
+        live = new LiveDownload(url);
+        inflight.set(url.pathname, live);
+        // 页面刷新/关闭后，SW 仍保持存活把下载写完。
+        if (event) { try { event.waitUntil(live.promise); } catch (e) { /* 忽略 */ } }
+    }
+    return live.respond(); // 流式：已下载字节立刻给到 + 后续实时续传
 }
 
-async function readStoredSha(cache) {
-    try {
-        const r = await cache.match(DATA_META_KEY);
-        if (r) return (await r.text()).trim();
-    } catch (e) { /* 忽略 */ }
-    return null;
+// ----------------------------------------------------------------------------
+// 后台按需校验（引擎文件）：小文件比对 sha256，data 比对 meta 哈希。
+// ----------------------------------------------------------------------------
+async function kickoffRevalidate(url, cache) {
+    if (url.pathname === DATA_PATH) {
+        const manifest = await getManifest(cache);
+        const expected = manifest ? manifest[DATA_PATH] : undefined;
+        if (!expected) return;
+        const stored = await readStoredSha(cache);
+        if (stored === expected) return; // 已最新
+        const fresh = await fetch(DATA_PATH, { cache: "reload" });
+        if (fresh && fresh.ok && fresh.type === "basic") {
+            const bytes = await readAllBytes(fresh.clone().body);
+            const sha = await sha256Hex(bytes);
+            await cache.put(DATA_PATH, fresh.clone()).catch(function () {});
+            await cache.put(DATA_META_KEY, new Response(sha, { headers: { "Content-Type": "text/plain" } }))
+                .catch(function () {});
+            notifyUpdate();
+        }
+        return;
+    }
+
+    const manifest = await getManifest(cache);
+    const expected = manifest ? manifest[url.pathname] : undefined;
+    if (!expected) return;
+    const cached = await cache.match(url.href);
+    if (!cached) return;
+    const hash = await sha256Hex(await readAllBytes(cached.clone().body));
+    if (hash === expected) return; // 已最新
+    const fresh = await fetch(url.href, { cache: "reload" });
+    if (fresh && fresh.ok && fresh.type === "basic") {
+        await cache.put(url.href, fresh.clone()).catch(function () {});
+        notifyUpdate();
+    }
+}
+
+// ============================================================================
+// 飞行下载（LiveDownload）：负责一次引擎文件的"流式 + 续传"下载。
+//   - 后台拉取网络流，边读边把字节块追加到内存缓冲；
+//   - 任意数量的页面消费者通过 stream() 回放"已缓冲字节 + 实时字节"；
+//   - 下载完成后把整份数据写回 CacheStorage（data 额外记录 meta sha256）。
+//   注意：缓冲整份文件（.data 约 50MB）是换取"刷新续传"的代价，下载完即释放。
+// ============================================================================
+const inflight = new Map(); // pathname -> LiveDownload
+
+class LiveDownload {
+    constructor(url) {
+        this.url = url;
+        this.path = url.pathname;
+        this.chunks = [];
+        this.received = 0;
+        this.total = 0;
+        this.headers = null;
+        this.status = 0;
+        this.statusText = "";
+        this.done = false;
+        this.failed = false;
+        this.waiters = new Set();    // 等待新数据块的 pull 续期器
+        this.headerWaiters = [];     // 等待响应头的 respond() 调用者
+        this.promise = this._start(); // 后台下载 + 写缓存，完成后解析
+    }
+
+    async _start() {
+        inflight.set(this.path, this);
+        try {
+            const resp = await fetch(this.url.href, { cache: "reload" });
+            this.status = resp.status;
+            this.statusText = resp.statusText;
+            this.headers = resp.headers;
+            if (!resp.ok || resp.type !== "basic") throw new Error("HTTP " + resp.status);
+            this.total = Number(resp.headers.get("Content-Length") || 0);
+            this._resolveHeaderWaiters();
+
+            const reader = resp.body.getReader();
+            for (;;) {
+                const r = await reader.read();
+                if (r.done) break;
+                this.chunks.push(r.value);
+                this.received += r.value.byteLength;
+                this._pump();
+            }
+            this.done = true;
+            this._pump();
+            await this._commit();
+        } catch (e) {
+            this.failed = true;
+            this.done = true;
+            this._pump();
+            this._rejectHeaderWaiters(e);
+        } finally {
+            inflight.delete(this.path);
+        }
+    }
+
+    _pump() {
+        for (const w of this.waiters) w();
+    }
+
+    _resolveHeaderWaiters() {
+        const arr = this.headerWaiters;
+        this.headerWaiters = [];
+        for (const w of arr) w.resolve();
+    }
+
+    _rejectHeaderWaiters(e) {
+        const arr = this.headerWaiters;
+        this.headerWaiters = [];
+        for (const w of arr) w.reject(e);
+    }
+
+    async _commit() {
+        if (this.failed || this.received === 0) return;
+        try {
+            const cache = await caches.open(CACHE_NAME);
+            const blob = new Blob(this.chunks);
+            const headers = new Headers(this.headers || {});
+            headers.delete("Content-Encoding"); // body 已是解压后的原始字节
+            headers.delete("Content-Length");
+            headers.delete("Set-Cookie");
+            await cache.put(this.url.href, new Response(blob, {
+                status: this.status || 200,
+                statusText: this.statusText || "OK",
+                headers: headers
+            }));
+            // 大文件 data 额外记录 sha256 到 meta，后续只做字符串比对
+            if (this.path === DATA_PATH) {
+                const buf = new Uint8Array(await blob.arrayBuffer());
+                const sha = await sha256Hex(buf);
+                await cache.put(DATA_META_KEY, new Response(sha, { headers: { "Content-Type": "text/plain" } }))
+                    .catch(function () {});
+            }
+        } catch (e) { /* 缓存失败不影响本次流式返回 */ }
+    }
+
+    // 构造给页面的响应：等待响应头（拿真实状态），然后流式返回。
+    // 失败时 reject，让页面侧 fetch 抛错从而走重试/离线提示。
+    respond() {
+        const self = this;
+        if (this.done) {
+            if (this.failed) return Promise.reject(new Error("engine download failed"));
+            return Promise.resolve(this._build());
+        }
+        return new Promise(function (resolve, reject) {
+            self.headerWaiters.push({
+                resolve: function () { resolve(self._build()); },
+                reject: reject
+            });
+        });
+    }
+
+    // 返回一个 Response：body 回放已缓冲字节 + 实时续传字节。
+    // 不设 Content-Length，Emscripten 会回退到 packageSize 计算进度，避免压缩偏差。
+    _build() {
+        const self = this;
+        let pos = 0;
+        const stream = new ReadableStream({
+            pull: function (controller) {
+                if (pos < self.chunks.length) {
+                    controller.enqueue(self.chunks[pos++]);
+                    return;
+                }
+                if (self.done) {
+                    if (self.failed && self.received === 0) {
+                        controller.error(new Error("engine download failed"));
+                        return;
+                    }
+                    controller.close();
+                    return;
+                }
+                return new Promise(function (resolve) {
+                    const waiter = function () {
+                        if (pos < self.chunks.length || self.done) {
+                            self.waiters.delete(waiter);
+                            resolve();
+                        }
+                    };
+                    self.waiters.add(waiter);
+                });
+            }
+        });
+
+        const headers = new Headers(self.headers || {});
+        headers.delete("Content-Encoding"); // 已解压，避免客户端二次解码
+        headers.delete("Content-Length");
+        headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+        headers.set("Cross-Origin-Opener-Policy", "same-origin");
+        return new Response(stream, {
+            status: self.status || 200,
+            statusText: self.statusText || "OK",
+            headers: headers
+        });
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -240,6 +416,14 @@ async function loadManifest(cache) {
     try {
         const r = await cache.match(MANIFEST_PATH);
         if (r) return (await r.json().catch(function () { return null; })) || null;
+    } catch (e) { /* 忽略 */ }
+    return null;
+}
+
+async function readStoredSha(cache) {
+    try {
+        const r = await cache.match(DATA_META_KEY);
+        if (r) return (await r.text()).trim();
     } catch (e) { /* 忽略 */ }
     return null;
 }
