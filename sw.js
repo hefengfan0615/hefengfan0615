@@ -85,6 +85,12 @@ async function serve(request) {
     const cache = await caches.open(CACHE_NAME);
     const url = new URL(request.url);
 
+    // 导航请求（HTML 文档）走快速通道：直接 Network-First 并注入 COOP/COEP，
+    // 不等待 version.json 拉取和 sha256 计算。无痕模式首屏时引擎卡 0% 的根因
+    // 正是多线程 WASM 需要的 SharedArrayBuffer 拿不到（页面未跨源隔离），而隔离头
+    // 只能由 SW 在导航响应里注入；若导航被哈希比对拖慢/拖垮，隔离就迟迟不生效。
+    if (request.mode === "navigate") return networkFirst(request, cache);
+
     if (url.pathname === MANIFEST_PATH) return networkFirst(request, cache);
     if (url.pathname === DATA_PATH) return serveData(request, cache);
     return serveSmall(request, url, cache);

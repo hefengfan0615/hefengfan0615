@@ -88,8 +88,13 @@
             // 手动/全新导航与自动刷新无关：计数清零
             if (!fromAuto) n = 0;
 
+            var reloading = false;
             function doReload() {
+                // 防止 controllerchange 与 setTimeout(ready) 并发触发重复刷新，
+                // 避免双重重载竞争导致文档尚未经 SW 注入隔离头就被中断。
+                if (reloading) { return; }
                 if (isIsolated()) { clearKeys(); return; }
+                reloading = true;
                 sessionStorage.setItem(LAST, String(Date.now()));
                 sessionStorage.setItem(AUTO, '1');
                 sessionStorage.setItem(COUNT, String(n + 1));
