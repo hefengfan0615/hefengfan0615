@@ -1597,10 +1597,10 @@ let j1 = async(t,e="zh-CN")=>{
     if (!navigator.onLine) return { msg: "unknown", side: t.split(" ")[1] };
     let r = t.split(" ")[1]
       , n;
-    // 增加 2s 超时：当 navigator.onLine 为 true 但实际网络不通时，
+    // 增加 1.5s 超时：当 navigator.onLine 为 true 但实际网络不通时，
     // 请求不会无限挂起，超时后按 unknown 处理，避免拖慢引擎出招。
     try {
-        n = await Promise.race([ip.get("https://www.chessdb.cn/chessdb.php?action=queryall&learn=1&showall=0&board=" + encodeURI(t)).then(o=>o.data), new Promise((u,o)=>setTimeout(()=>o(new Error("timeout")),2000))])
+        n = await Promise.race([ip.get("https://www.chessdb.cn/chessdb.php?action=queryall&learn=1&showall=0&board=" + encodeURI(t)).then(o=>o.data), new Promise((u,o)=>setTimeout(()=>o(new Error("timeout")),1500))])
     } catch (err) {
         return { msg: "unknown", side: r };
     }
@@ -32912,8 +32912,8 @@ const gy = "XIANGQIAI_COM_"
                 if (this.thinkingSettings.chessdb.auto_move) {
                     let e = !1;
                     if (!(t in this.chessDbRecords))
-                        // 在线最多等待 0.5s 云库结果；无网时立即放行引擎出招。
-                        if (!navigator.onLine || (t in this.chessDbFenQueryTime || (this.chessDbFenQueryTime[t] = new Date().getTime()), new Date().getTime() - this.chessDbFenQueryTime[t] > 500))
+                        // 在线最多等待 2s 云库结果；无网时立即放行引擎出招。
+                        if (!navigator.onLine || (t in this.chessDbFenQueryTime || (this.chessDbFenQueryTime[t] = new Date().getTime()), new Date().getTime() - this.chessDbFenQueryTime[t] > 2000))
                             e = !0;
                         else
                             return;
