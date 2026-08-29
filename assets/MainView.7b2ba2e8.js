@@ -1597,10 +1597,10 @@ let j1 = async(t,e="zh-CN")=>{
     if (!navigator.onLine) return { msg: "unknown", side: t.split(" ")[1] };
     let r = t.split(" ")[1]
       , n;
-    // 增加 1.5s 超时：当 navigator.onLine 为 true 但实际网络不通时，
+    // 增加 2s 超时：当 navigator.onLine 为 true 但实际网络不通时，
     // 请求不会无限挂起，超时后按 unknown 处理，避免拖慢引擎出招。
     try {
-        n = await Promise.race([ip.get("https://www.chessdb.cn/chessdb.php?action=queryall&learn=1&showall=0&board=" + encodeURI(t)).then(o=>o.data), new Promise((u,o)=>setTimeout(()=>o(new Error("timeout")),1500))])
+        n = await Promise.race([ip.get("https://www.chessdb.cn/chessdb.php?action=queryall&learn=1&showall=0&board=" + encodeURI(t)).then(o=>o.data), new Promise((u,o)=>setTimeout(()=>o(new Error("timeout")),2000))])
     } catch (err) {
         return { msg: "unknown", side: r };
     }
