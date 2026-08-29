@@ -160,10 +160,8 @@ async function cacheFirstEngine(event, req, url, cache) {
 
     // 无缓存：若正在下载则续传，否则启动新的飞行下载。
     let live = inflight.get(url.pathname);
-    if (live && live.done) {
-        const now = await cache.match(req);
-        if (now) return withIsolationHeaders(now);
-        live = null; // 已完成但未入缓存（失败）：重新下载
+    if (live && live.failed) {
+        live = null; // 上次下载失败：重新开始
     }
     if (!live) {
         live = new LiveDownload(url);
@@ -320,25 +318,34 @@ class LiveDownload {
 
     // 构造给页面的响应：
     //   首个消费者 → 直接使用网络原生流 [a]（进度必达）。
-    //   后续消费者（刷新续传）→ 回放已缓冲字节 + 实时字节。
+    //   后续消费者（刷新续传）→ 回放已缓冲字节 + 实时字节（即使下载未完，
+    //       也立即返回回放流，避免被 headerWaiters 永久阻塞而进度一直为 0）。
     //   失败时 reject，让页面侧 fetch 抛错从而走重试/离线提示。
     respond() {
         const self = this;
+        // 网络响应头还没到（下载尚未开始回源）：先排队等流就绪。
+        if (!this.pageStream && !this.done) {
+            return new Promise(function (resolve, reject) {
+                self.headerWaiters.push({
+                    resolve: function () { resolve(self.respond()); },
+                    reject: reject
+                });
+            });
+        }
+        // 首个消费者：直接把网络原生流 [a] 给它。
         if (!this.pageStreamTaken && this.pageStream) {
             this.pageStreamTaken = true;
             return Promise.resolve(this._buildNetworkResponse());
         }
+        // 已完成/失败：给明确结果。
         if (this.done) {
-            if (this.failed) return Promise.reject(new Error("engine download failed"));
+            if (this.failed && this.received === 0) {
+                return Promise.reject(new Error("engine download failed"));
+            }
             return Promise.resolve(this._buildReplayResponse());
         }
-        // 响应头还没到：等拿到网络流后再决定
-        return new Promise(function (resolve, reject) {
-            self.headerWaiters.push({
-                resolve: function () { resolve(self.respond()); },
-                reject: reject
-            });
-        });
+        // 下载进行中：后续消费者（刷新续传）→ 回放已缓冲字节 + 实时字节。
+        return Promise.resolve(this._buildReplayResponse());
     }
 
     // 网络原生流响应：浏览器逐步转发到页面，进度可见。
