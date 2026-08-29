@@ -235,7 +235,10 @@ class LiveDownload {
         this.pageStreamTaken = false;
         this.done = false;
         this.failed = false;
-        this.waiters = new Set();    // 等待新数据块的 pull 续期器
+        // 续传消费者（刷新后的页面请求）：push 模型，_start() 每收到一块就喂给它们。
+        // 不使用 pull 返回 Promise 的续期方式 —— 实测浏览器/Node 在 Promise 兑现后
+        // 不再重新调用 pull，会导致刷新续传的流死锁、进度一直为 0。
+        this.replayConsumers = new Set();
         this.headerWaiters = [];     // 等待响应头的 respond() 调用者
         this.promise = this._start(); // 后台下载 + 写缓存，完成后解析
     }
@@ -261,23 +264,48 @@ class LiveDownload {
                 if (r.done) break;
                 this.chunks.push(r.value);
                 this.received += r.value.byteLength;
-                this._pump();
+                this._pumpReplays();
             }
             this.done = true;
-            this._pump();
+            this._pumpReplays();
             await this._commit();
         } catch (e) {
             this.failed = true;
             this.done = true;
-            this._pump();
+            this._pumpReplays();
             this._rejectHeaderWaiters(e);
         } finally {
             inflight.delete(this.path);
         }
     }
 
-    _pump() {
-        for (const w of this.waiters) w();
+    // push 模型：把新到/已缓冲的字节喂给所有续传消费者。
+    _pumpReplays() {
+        for (const c of this.replayConsumers) this._feedReplay(c);
+    }
+
+    // 喂给单个续传消费者：回放已缓冲块；下载结束后 close/error。
+    _feedReplay(consumer) {
+        const controller = consumer.controller;
+        if (!consumer.active || !controller) return;
+        try {
+            while (consumer.pos < this.chunks.length) {
+                controller.enqueue(this.chunks[consumer.pos++]);
+            }
+            if (this.done) {
+                if (this.failed && this.received === 0) {
+                    controller.error(new Error("engine download failed"));
+                } else {
+                    controller.close();
+                }
+                consumer.active = false;
+                this.replayConsumers.delete(consumer);
+            }
+        } catch (e) {
+            // 消费者已取消（页面刷新 / fetch 中止）：移除即可
+            consumer.active = false;
+            this.replayConsumers.delete(consumer);
+        }
     }
 
     _resolveHeaderWaiters() {
@@ -364,32 +392,20 @@ class LiveDownload {
     }
 
     // 续传响应：回放已缓冲字节 + 实时字节（仅刷新后下载未完时使用）。
+    // push 模型：start() 时立即回放已缓冲块；之后 _start() 每收到一块就经
+    // _pumpReplays() 推给本流。不用 pull 返回 Promise 续期，规避流死锁。
     _buildReplayResponse() {
         const self = this;
-        let pos = 0;
+        const consumer = { pos: 0, controller: null, active: true };
         const stream = new ReadableStream({
-            pull: function (controller) {
-                if (pos < self.chunks.length) {
-                    controller.enqueue(self.chunks[pos++]);
-                    return;
-                }
-                if (self.done) {
-                    if (self.failed && self.received === 0) {
-                        controller.error(new Error("engine download failed"));
-                        return;
-                    }
-                    controller.close();
-                    return;
-                }
-                return new Promise(function (resolve) {
-                    const waiter = function () {
-                        if (pos < self.chunks.length || self.done) {
-                            self.waiters.delete(waiter);
-                            resolve();
-                        }
-                    };
-                    self.waiters.add(waiter);
-                });
+            start: function (controller) {
+                consumer.controller = controller;
+                self.replayConsumers.add(consumer);
+                self._feedReplay(consumer); // 立即回放已缓冲字节，进度即刻可见
+            },
+            cancel: function () {
+                consumer.active = false;
+                self.replayConsumers.delete(consumer);
             }
         });
 
