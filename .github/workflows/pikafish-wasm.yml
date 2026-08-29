@@ -113,14 +113,6 @@ jobs:
           PY
           ls -lh ../version.json
 
-      # 依据引擎内容哈希同步 ENGINE_VERSION 到 sw.js，实现"版本化缓存名 + 激活时清旧缓存"。
-      # 引擎内容不变即版本不变，避免每次部署都失效缓存导致 ~50MB 引擎数据被重复下载。
-      - name: Sync engine version to sw.js
-        working-directory: ./
-        run: |
-          chmod +x scripts/sync-engine-version.sh
-          scripts/sync-engine-version.sh
-
       # Step 2: test exactly like the web page loads the engine
       # (Pikafish().then(...); engine.send_command(...)):
       #   - uci / isready handshake (NNUE data file is loaded from pikafish.data)
@@ -140,6 +132,6 @@ jobs:
           git config user.name "Pikafish Bot"
           git config user.email "pikafish-bot@github.com"
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-          git add -f wasm/ version.json sw.js scripts/sync-engine-version.sh
+          git add -f wasm/ version.json sw.js
           git commit -m "Update WASM build + content manifest (multithreaded, NNUE data file) [skip ci]" || echo "No changes to commit"
           git push
