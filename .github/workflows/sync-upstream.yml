@@ -27,7 +27,7 @@ jobs:
         run: |
           set -euxo pipefail
           rm -rf /tmp/source
-          git clone --depth 1 --branch main \
+          git clone --depth 1 --branch master \
             https://github.com/hefengfan0615/hefengfan0615.github.io.git \
             /tmp/source
 
