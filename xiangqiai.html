@@ -69,7 +69,7 @@
             var COUNT = 'xiangqi-co-count';     // 注入式自动刷新的次数（用于兜住恶性循环）
             var LAST = 'xiangqi-co-last';       // 上一次自动刷新的时间戳（简单限流）
             var MIN_MS = 1500;                  // 自动刷新的最小间隔
-            var MAX_AUTO = 3;                   // 自动刷新次数上限，防止隔离迟迟不来时无限刷新
+            var MAX_AUTO = 6;                   // 自动刷新次数上限，防止隔离迟迟不来时无限刷新
 
             function isIsolated() { return window.crossOriginIsolated === true; }
             function clearKeys() {
@@ -87,6 +87,13 @@
             sessionStorage.removeItem(AUTO); // 消费该标记
             // 手动/全新导航与自动刷新无关：计数清零
             if (!fromAuto) n = 0;
+            // 关键修复（无痕模式卡 0%）：本次页面加载时 SW 尚未接管（controller 为空），
+            // 说明上一步那个"自动刷新"根本没经过 SW，COOP/COEP 注入不到文档，属于无效
+            // 尝试。连点原生刷新时这类无效导航会把自动刷新预算白白耗尽，等 SW 真正接管
+            // 后预算已用完 → 引导就此停手，页面停在未隔离、引擎进度一直 0%。因此凡是
+            // 非 SW 接管的无效加载一律不计入预算，保证后续一经 SW 接管的有效刷新仍会继续
+            // 执行到隔离完成；而"引擎已在后台续传、一隔离即以已下载进度继续"由 sw.js 保证。
+            if (!navigator.serviceWorker.controller) n = 0;
 
             var reloading = false;
             function doReload() {
@@ -136,6 +143,146 @@
     </noscript>
     <div id="app"></div>
     <!-- built files will be auto injected -->
+    <script>
+        // 关于界面底部：只显示 引擎版本（来自引擎 UCI info 消息）和 最后更新时间（北京时间）。
+        // 不修改压缩后的前端 bundle，用 MutationObserver 在"关于"对话框打开时注入。
+        (function () {
+            if (!window.MutationObserver) { return; }
+
+            var boxes = [];          // 已注入的显示块
+            var engineVersion = null; // 引擎 UCI "id name" 行里报告的版本
+
+            // 引擎的每行输出被前端 bundle 以 " > " 前缀打到 console，
+            // 其中 "id name Pikafish ..." 就是引擎自己报告的版本信息。
+            (function () {
+                var orig = console.log;
+                console.log = function () {
+                    try {
+                        var s = Array.prototype.join.call(arguments, ' ');
+                        if (s.indexOf(' > id name ') === 0) {
+                            engineVersion = s.slice(' > id name '.length).trim();
+                            rerenderAll();
+                        }
+                    } catch (e) { /* 忽略 */ }
+                    return orig.apply(console, arguments);
+                };
+            })();
+
+            function esc(s) {
+                return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+                    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+                });
+            }
+
+            // version.json 里的 ISO 时间（UTC+00:00）转北京时间 (UTC+8) 显示
+            function beijingTime(iso) {
+                var d = new Date(iso);
+                if (isNaN(d.getTime())) { return '未知'; }
+                var b = new Date(d.getTime() + 8 * 3600 * 1000);
+                function p(n) { return (n < 10 ? '0' : '') + n; }
+                return b.getUTCFullYear() + '-' + p(b.getUTCMonth() + 1) + '-' + p(b.getUTCDate()) +
+                    ' ' + p(b.getUTCHours()) + ':' + p(b.getUTCMinutes()) + ':' + p(b.getUTCSeconds());
+            }
+
+            function row(title, value) {
+                return '<div style="font-weight:700;margin:12px 0 2px">' + esc(title) + '</div>' +
+                    '<div>' + esc(value) + '</div>';
+            }
+
+            function render(box) {
+                box.innerHTML = row('引擎版本', engineVersion || '加载中…');
+                fetch('/version.json', { cache: 'no-store' })
+                    .then(function (r) {
+                        if (!r.ok) { throw new Error('HTTP ' + r.status); }
+                        return r.json();
+                    })
+                    .catch(function () { return null; })
+                    .then(function (info) {
+                        box.innerHTML = row('引擎版本', engineVersion || '加载中…') +
+                            row('最后更新时间', info && info.updatedAt ? beijingTime(info.updatedAt) : '未知');
+                    });
+            }
+
+            function rerenderAll() {
+                boxes.forEach(function (b) { render(b); });
+            }
+
+            function tryInject() {
+                var about = document.querySelector('.about');
+                if (!about) { return false; }
+                var content = about.querySelector('.content');
+                if (!content) { return false; }
+                if (content.getAttribute('data-xiangqi-about-info')) { return true; }
+                content.setAttribute('data-xiangqi-about-info', '1');
+                var box = document.createElement('div');
+                box.style.cssText = 'border-top:1px dashed #c5bdbd;margin-top:14px;padding:4px 20px 14px;' +
+                    'font-size:0.8rem;color:#333;line-height:1.7;text-align:left;overflow:hidden';
+                box.innerHTML = '<div>加载中…</div>';
+                content.appendChild(box);
+                boxes.push(box);
+                render(box);
+                return true;
+            }
+
+            var tries = 0;
+            function onMaybeOpen() {
+                if (tryInject()) { return; }
+                if (++tries > 20) { return; }
+                setTimeout(onMaybeOpen, 150); // 等 Vue 把对话框内容渲染完
+            }
+
+            new MutationObserver(onMaybeOpen).observe(document.documentElement, { childList: true, subtree: true });
+            onMaybeOpen(); // 页面加载时若 About 已打开则立即尝试
+        })();
+    </script>
+    <script>
+        // 主动检查 Service Worker 本体（sw.js）是否有更新：检测到新版就自动接管并刷新一次。
+        // 目的：让"引擎缓存同步校验"等最新 SW 逻辑尽快在用户浏览器里生效，
+        // 否则浏览器默认最长 24 小时才检查一次 sw.js，导致改了引擎刷新却还用旧缓存。
+        // 放在 HTML 里：HTML 走网络优先，每次都是最新版，能绕开"旧 SW 服务旧页面"的困境。
+        (function () {
+            if (!('serviceWorker' in navigator)) { return; }
+            var KEY = 'xiangqi-sw-autoreload';
+            var MAX = 2; // 每会话最多自动刷新 2 次，防止新旧交替时死循环
+            var reloaded = false;
+
+            function doReload() {
+                if (reloaded) { return; }
+                reloaded = true;
+                window.location.reload();
+            }
+
+            function adoptNew(reg, n) {
+                if (!reg.waiting || !navigator.serviceWorker.controller) { return; }
+                sessionStorage.setItem(KEY, String(n + 1));
+                reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+                navigator.serviceWorker.addEventListener('controllerchange', doReload);
+                setTimeout(doReload, 4000); // 兜底：controllerchange 未触发也能刷新
+            }
+
+            navigator.serviceWorker.register('/sw.js', { scope: '/' }).then(function (reg) {
+                var n = parseInt(sessionStorage.getItem(KEY) || '0', 10);
+                if (n >= MAX) { return; }
+
+                if (reg.waiting && navigator.serviceWorker.controller) {
+                    adoptNew(reg, n); // 已有新版在等待接管
+                    return;
+                }
+                reg.addEventListener('updatefound', function () {
+                    var w = reg.installing;
+                    if (!w) { return; }
+                    w.addEventListener('statechange', function () {
+                        // 新版安装完成且页面已被旧 SW 控制 → 自动切换并刷新
+                        if (w.state === 'installed' && navigator.serviceWorker.controller) {
+                            adoptNew(reg, n);
+                        }
+                    });
+                });
+                // 强制绕过 HTTP 缓存检查 sw.js 更新
+                if (typeof reg.update === 'function') { reg.update().catch(function () {}); }
+            }).catch(function () {});
+        })();
+    </script>
 </body>
 
 </html>
