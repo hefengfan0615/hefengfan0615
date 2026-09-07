@@ -14365,20 +14365,9 @@ var IS = (e,t)=>{
 ;
 const su = kS({
     onNeedRefresh() {
-        _m({
-            title: "\u53D1\u73B0\u65B0\u7248\u672C",
-            message: "\u662F\u5426\u5237\u65B0\u9875\u9762\u4EE5\u66F4\u65B0\u5230\u6700\u65B0\u7248\u672C\uFF1F",
-            showCancelButton: !0,
-            confirmButtonText: "\u7ACB\u5373\u5237\u65B0",
-            cancelButtonText: "\u7A0D\u540E\u5237\u65B0"
-        }).then(()=>{
-            su(!0)
-        }
-        ).catch(()=>{
-            su(!1),
-            hE("\u65B0\u7248\u672C\u5C06\u5728\u4E0B\u6B21\u6253\u5F00\u65F6\u751F\u6548")
-        }
-        )
+        // 静默更新：既不弹窗询问、也不自动刷新打断用户。仅把新版 SW
+        // 跳过等待、在后台就绪；当前界面继续用原缓存，下次自然打开再生效。
+        su(!1)
     },
     onOfflineReady() {}
 });

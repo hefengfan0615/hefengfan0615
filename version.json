@@ -1,5 +1,5 @@
 {
-  "engineVersion": "c52e201",
+  "engineVersion": "b3d4d63",
   "files": {
     "/assets/ChessBoard.46291e70.js": {
       "sha256": "f832ef8254f774a7af3214842f28ba1755cc358cf2c4bd72050aeab33f75ef34",
@@ -30,8 +30,8 @@
       "size": 199510
     },
     "/assets/index.b58f0dd0.js": {
-      "sha256": "c6014d6555bb08e9b0ae17b6f397cc1ec591469cac2dc51e52129702cc15e020",
-      "size": 507893
+      "sha256": "c19e9b0e7d7a34f7c0cb9d4a84cf6e54888ca912da5a4dd464e8da62bdd3a2f6",
+      "size": 507577
     },
     "/assets/vschess.function.e5de4338.js": {
       "sha256": "ab64242006bd2a4b9180d56c1ac82069f69bb814e51b0c9315f051e3d5e03e37",
@@ -46,25 +46,25 @@
       "size": 87038
     },
     "/sw.js": {
-      "sha256": "bfadc8b19f10d37e7cb289c9ef82e10e9f72eef94c94bb11ee06af1046a053ab",
-      "size": 29895
+      "sha256": "49ced7c6f911b57733bcf7911fe78859d8bdf5d60465107808b7e548fe63ea08",
+      "size": 28031
     },
     "/wasm/pikafish.data": {
-      "sha256": "3cd15292bf8c979884262f57fc723959fc0dea43b4d8d544f88db5ceb2479e24",
-      "size": 51585654
+      "sha256": "7d13d73569a9b571ba0eb20cf1596247bc2a42738967e61afef6482b231e900e",
+      "size": 50706378
     },
     "/wasm/pikafish.js": {
-      "sha256": "1e62dbe7f9be95fc6b2d4f6bea672bba34cc7f020eaccc0c311e8b01478e4ade",
+      "sha256": "3f243b0ab6754c13ac8fefac980402c48be39936ffa5fb68b02ff9106aa61434",
       "size": 84362
     },
     "/wasm/pikafish.wasm": {
-      "sha256": "38bc578ecf8880ad8d0882ea69ede33db10fb58faba2a33cb177f2a003096637",
-      "size": 721910
+      "sha256": "083c9c992229ed9bf271bf9007d7500ad4990a772ecdaf6f72f04c3254839df0",
+      "size": 721928
     },
     "/xiangqiai.html": {
-      "sha256": "acc080572e5a1cab1a97f00caa95c1e8f0889706103ddd60481d24fe4efa66ba",
-      "size": 15008
+      "sha256": "775d3d625997ff8569a22e26f748ba1bdfb2190d8f8dce0374d35f9c953f86ce",
+      "size": 20916
     }
   },
-  "updatedAt": "2026-09-05T20:15:03+08:00"
+  "updatedAt": "2026-09-06T19:41:53+08:00"
 }
